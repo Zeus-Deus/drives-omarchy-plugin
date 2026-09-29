@@ -1,0 +1,16 @@
+{
+  "schemaVersion":1,
+  "id":"io.github.zeus-deus.drives",
+  "name":"Drives",
+  "version":"0.1.0",
+  "author":"Zeus-Deus",
+  "license":"MIT",
+  "description":"Encrypted-drive overview and guarded folder moves with inspect-only recovery",
+  "kinds":["bar-widget"],
+  "entryPoints":{"barWidget":"Panel.qml"},
+  "barWidget":{
+    "displayName":"Drives","category":"System","allowMultiple":false,"defaultSection":"right",
+    "defaults":{"showUsage":true},
+    "schema":[{"key":"showUsage","type":"boolean","label":"Show data-drive usage in bar","defaultValue":true}]
+  }
+}

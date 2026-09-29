@@ -1,0 +1,5 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+function model(){const file=path.join(__dirname,'../Model.js');assert.ok(fs.existsSync(file),'display and state model is not implemented');let c={};vm.createContext(c);vm.runInContext(fs.readFileSync(file,'utf8'),c);return c;}
+test('confirmation fragments cannot inject controls/bidi or extra lines',()=>{const m=model();assert.equal(m.display('disk\n\u202e name\t'),'disk name');});
+test('default destructive selection is Cancel and wrong serial cannot proceed',()=>{const m=model();assert.equal(m.canProvision({serial:'TESTNEW0002',system:false,selectable:true},'Y003'),false);assert.equal(m.canProvision({serial:'TESTNEW0002',system:false,selectable:true},'0002'),true);assert.equal(m.canProvision({serial:'TESTNEW0002',system:true,selectable:true},'0002'),false);});
+test('wheel is immediate and clamped at both ends',()=>{const m=model();assert.equal(m.scroll(0,-120,0,1000,200,28),84);assert.equal(m.scroll(790,-120,0,1000,200,28),800);assert.equal(m.scroll(20,120,0,1000,200,28),0);});

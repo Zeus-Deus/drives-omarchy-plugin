@@ -1,0 +1,32 @@
+[Unit]
+Description=Drives storage helper
+After=dbus.service udisks2.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=io.github.zeus_deus.Drives
+WorkingDirectory=/usr/lib/drives-helper
+ExecStart=/usr/bin/python3 -m helper.service
+User=root
+UMask=0077
+StateDirectory=drives-helper
+StateDirectoryMode=0700
+ProtectSystem=strict
+ReadWritePaths=/var/lib/drives-helper /etc/fstab /etc/crypttab /etc/cryptsetup-keys.d /home /mnt/drives -/data -/data2 -/data3 -/data4
+ProtectHome=no
+PrivateTmp=yes
+PrivateDevices=no
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_LINUX_IMMUTABLE CAP_SYS_ADMIN CAP_IPC_LOCK
+Restart=on-failure
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
