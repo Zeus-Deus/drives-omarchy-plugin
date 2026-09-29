@@ -21,5 +21,6 @@ install -m 0644 "$source_dir/packaging/io.github.zeus_deus.Drives.conf" /etc/dbu
 systemctl daemon-reload
 systemctl reload dbus.service
 systemctl enable --now drives-helper.service
+systemctl restart drives-helper.service
 printf '%s
 ' 'Helper installed. No disk was provisioned or folder moved.'

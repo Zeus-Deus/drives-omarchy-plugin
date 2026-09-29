@@ -31,10 +31,13 @@ def open_users(path):
             targets=list((proc/'fd').iterdir())+[proc/'cwd',proc/'root']
             for fd in targets:
                 try:target=os.readlink(fd)
-                except OSError:continue
+                except PermissionError:raise
+                except (FileNotFoundError,ProcessLookupError):continue
                 if target==path or target.startswith(path+'/'):
                     found.append({'pid':int(proc.name),'name':(proc/'comm').read_text().strip()});break
-        except (OSError,PermissionError):continue
+        except PermissionError as exc:
+            raise Failure("cannot inspect open files; root helper needs proc visibility") from exc
+        except (FileNotFoundError,ProcessLookupError):continue
     return found[:24]
 
 def tree_stats(path,uid=None):

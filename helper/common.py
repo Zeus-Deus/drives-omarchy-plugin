@@ -68,7 +68,7 @@ def atomic(path,data,mode=0o600):
 def boot_id():return pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 
 def mount_rows():
-    data=read_regular('/proc/self/mountinfo').decode()
+    data=read_regular('/proc/1/mountinfo' if os.geteuid()==0 else '/proc/self/mountinfo').decode()
     def unescape(s):return re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),s)
     rows=[]
     for line in data.splitlines():
@@ -89,7 +89,7 @@ def mount_for(path,rows=None):
 class Common:
     run=staticmethod(run)
     boot_id=staticmethod(boot_id)
-    def __init__(self,state_dir='/var/lib/drives-helper'):
+    def __init__(self,state_dir: str | os.PathLike='/var/lib/drives-helper'):
         self.state_dir=pathlib.Path(state_dir)
         if self.state_dir.is_symlink():raise Failure('unsafe state directory')
         self.state_dir.mkdir(mode=0o700,parents=True,exist_ok=True)

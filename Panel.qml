@@ -123,19 +123,19 @@ BarWidget {
                         trailingControl:Component { Button { text:root.view==="overview"?"Rescan":"Back";onClicked:{if(root.view==="overview"){service.error="";service.refresh();}else root.go("overview");} } }
                     }
                     Text {
-                        width:parent.width;visible:service.error!==""||root.jobError!==""
+                        width:content.width;visible:service.error!==""||root.jobError!==""
                         text:service.error||root.jobError;color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText
                     }
                     Text {
-                        width:parent.width;visible:!root.storage.helperAvailable
+                        width:content.width;visible:!root.storage.helperAvailable
                         text:"Read-only overview. Install the system helper explicitly to enable provisioning and folder moves; the plugin never elevates itself.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText
                     }
                     Text {
-                        width:parent.width;visible:root.storage.testFixtureMode===true
+                        width:content.width;visible:root.storage.testFixtureMode===true
                         text:"VM test fixture: OS root is plaintext. This does not prove encrypted-root key protection.";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="overview"||root.view==="add"
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview"||root.view==="add"
                         PanelSectionHeader { text:root.view==="add"?"CHOOSE THE EXACT DISK":"SYSTEM & DATA" }
                         Repeater {
                             id:diskRows
@@ -146,7 +146,7 @@ BarWidget {
                                 property var disk:root.disks[index]||({})
                                 width:content.width;spacing:Style.spacing.xs
                                 Button {
-                                    width:parent.width;leftAlign:true;hasCursor:root.cursor===index
+                                    width:content.width;leftAlign:true;hasCursor:root.cursor===index
                                     text:Model.display(parent.disk.model)+" · "+Model.bytes(parent.disk.size)+"\n"+(parent.disk.system?"System · ":"")+Model.display(parent.disk.state)+" · "+(parent.disk.encrypted?"encrypted":"not encrypted")+(parent.disk.serial?" · …"+Model.display(parent.disk.serial.slice(-4)):"")
                                     enabled:root.view!=="add"||parent.disk.selectable===true
                                     onClicked: {root.selectedDiskId=parent.disk.id;if(root.view!=="add")root.selectDisk(parent.disk);}
@@ -156,16 +156,16 @@ BarWidget {
                                     Text {
                                         required property int index
                                         property var u:diskColumn.disk.usage[index]||({})
-                                        width:parent.width;text:Model.display(u.target)+" · "+u.percent+"% used · "+Model.bytes(u.free)+" free"
+                                        width:content.width;text:Model.display(u.target)+" · "+u.percent+"% used · "+Model.bytes(u.free)+" free"
                                         font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;color:root.ink;textFormat:Text.PlainText
                                     }
                                 }
                             }
                         }
-                        Text {width:parent.width;visible:service.loaded && root.disks.length===0;text:"No supported disks detected. Network, RAID, LVM and loop topologies are not guessed.";font.family:Style.font.family;font.pixelSize:Style.font.body;color:root.ink;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;visible:service.loaded && root.disks.length===0;text:"No supported disks detected. Network, RAID, LVM and loop topologies are not guessed.";font.family:Style.font.family;font.pixelSize:Style.font.body;color:root.ink;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="overview"
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview"
                         PanelSectionHeader {text:"MOVED FOLDERS & RECOVERY"}
                         Repeater {
                             id:moveRows;model:root.moves.length
@@ -181,50 +181,50 @@ BarWidget {
                         Row {spacing:Style.spacing.sm;Button{text:"+ Add drive";enabled:root.storage.helperAvailable;onClicked:root.go("add");}Button{text:"Move folder";enabled:root.storage.helperAvailable;onClicked:root.go("move");}}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="add" && root.chosenDisk!==null
-                        Text {width:parent.width;text:"Everything on "+(root.chosenDisk?Model.display(root.chosenDisk.model):"")+" will be erased. Confirm this disk's serial, not another disk's.";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        TextField {id:serialField;width:parent.width;placeholderText:"Type last 4 serial characters";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
-                        TextField {id:nameField;width:parent.width;text:"data2";placeholderText:"Mapper name";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
-                        TextField {id:mountField;width:parent.width;text:"/data2";placeholderText:"Mountpoint";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
-                        Toggle {id:eraseToggle;width:parent.width;label:"Erase existing partitions/signatures";checked:false;onClicked:checked=!checked;}
-                        Toggle {id:autoToggle;width:parent.width;label:"Unlock with the OS";description:"Encrypted OS root required";checked:true;onClicked:checked=!checked;}
-                        Text {width:parent.width;text:"Btrfs · zstd · TRIM through encryption off. Recovery passphrase and its safe-storage confirmation open in a separate native window. Export the header backup off-machine afterwards.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="add" && root.chosenDisk!==null
+                        Text {width:content.width;text:"Everything on "+(root.chosenDisk?Model.display(root.chosenDisk.model):"")+" will be erased. Confirm this disk's serial, not another disk's.";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        TextField {id:serialField;width:content.width;placeholderText:"Type last 4 serial characters";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        TextField {id:nameField;width:content.width;text:"data2";placeholderText:"Mapper name";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        TextField {id:mountField;width:content.width;text:"/data2";placeholderText:"Mountpoint";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        Toggle {id:eraseToggle;width:content.width;label:"Erase existing partitions/signatures";checked:false;onClicked:checked=!checked;}
+                        Toggle {id:autoToggle;width:content.width;label:"Unlock with the OS";description:"Encrypted OS root required";checked:true;onClicked:checked=!checked;}
+                        Text {width:content.width;text:"Btrfs · zstd · TRIM through encryption off. Recovery passphrase and its safe-storage confirmation open in a separate native window. Export the header backup off-machine afterwards.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Button {text:"Continue to encryption & recovery…";enabled:root.storage.helperAvailable && Model.canProvision(root.chosenDisk,serialField.text) && (!autoToggle.checked||root.storage.rootEncrypted||root.storage.testFixtureMode);onClicked:root.provision();}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="move"
-                        Text {width:parent.width;text:"Copy → full checksum & metadata verify → bind → read/write test. Open files, nested mounts, profiles, credentials and unreadable subtrees block the move. Nothing is killed. Keep the old copy until a successful reboot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        TextField {id:sourceField;width:parent.width;placeholderText:"Absolute source folder (e.g. ~/Videos expanded)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
-                        TextField {id:destinationField;width:parent.width;placeholderText:"Encrypted destination mount (e.g. /data)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="move"
+                        Text {width:content.width;text:"Copy → full checksum & metadata verify → bind → read/write test. Open files, nested mounts, profiles, credentials and unreadable subtrees block the move. Nothing is killed. Keep the old copy until a successful reboot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        TextField {id:sourceField;width:content.width;placeholderText:"Absolute source folder (e.g. ~/Videos expanded)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        TextField {id:destinationField;width:content.width;placeholderText:"Encrypted destination mount (e.g. /data)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         Button {text:"Review move…";enabled:root.storage.helperAvailable && sourceField.text!=="" && destinationField.text!=="" && !service.mutating;onClicked:root.startMove();}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="manage" && root.chosenDisk!==null
-                        Text {width:parent.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · SMART: not checked":"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Text {width:parent.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked";text:"Disk is present but locked. Missing keyfile or a new OS? Use the recovery passphrase. No secret is entered in this panel.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="manage" && root.chosenDisk!==null
+                        Text {width:content.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · SMART: not checked":"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked";text:"Disk is present but locked. Missing keyfile or a new OS? Use the recovery passphrase. No secret is entered in this panel.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Button {text:"Unlock with recovery passphrase…";visible:root.chosenDisk&&root.chosenDisk.state==="locked";enabled:root.chosenDisk && root.chosenDisk.encryptedObject;onClicked:service.launch(["unlock","--device",root.chosenDisk.encryptedObject]);}
-                        TextField {id:exportField;width:parent.width;placeholderText:"Absolute header-export path in your home";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
+                        TextField {id:exportField;width:content.width;placeholderText:"Absolute header-export path in your home";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         Button {text:"Export header backup…";enabled:root.storage.helperAvailable && exportField.text!=="";onClicked:{var d=root.storage.drives||[];for(var i=0;i<d.length;i++)if(d[i].serial===root.chosenDisk.serial)service.submit({op:"export_header",name:d[i].name,destination:exportField.text});}}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="resume" && root.chosenMove!==null
-                        Text {width:parent.width;text:root.chosenMove?Model.display(root.chosenMove.source)+" → "+Model.display(root.chosenMove.destMount)+"\n"+Model.display(root.chosenMove.state)+" · "+(root.chosenMove.bound?"bind active":"bind absent")+"\n"+Model.display(root.chosenMove.error||""):"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Text {width:parent.width;text:root.chosenMove&&root.chosenMove.originalAvailable?"Your original is untouched and stays in use. Continue syncs changes and restarts full verification.":"Inspect both copies before acting. Nothing resumes automatically at boot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="resume" && root.chosenMove!==null
+                        Text {width:content.width;text:root.chosenMove?Model.display(root.chosenMove.source)+" → "+Model.display(root.chosenMove.destMount)+"\n"+Model.display(root.chosenMove.state)+" · "+(root.chosenMove.bound?"bind active":"bind absent")+"\n"+Model.display(root.chosenMove.error||""):"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:root.chosenMove&&root.chosenMove.originalAvailable?"Your original is untouched and stays in use. Continue syncs changes and restarts full verification.":"Inspect both copies before acting. Nothing resumes automatically at boot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Button {text:"Continue (full verify)";enabled:root.storage.helperAvailable&&!service.mutating;onClicked:root.action("resume_move");}
                         Row {spacing:Style.spacing.sm;Button{text:"Start over…";enabled:root.chosenMove&&root.chosenMove.originalAvailable;onClicked:root.action("restart_move");}Button{text:"Cancel move…";enabled:root.chosenMove&&root.chosenMove.originalAvailable;onClicked:root.action("cancel_move");}}
                         Button {text:"Undo move…";enabled:root.chosenMove&&root.chosenMove.oldCopyAvailable;onClicked:root.action("rollback_move");}
                         Button {text:"Delete old copy…";enabled:root.chosenMove&&root.chosenMove.canDelete===true;foreground:Color.urgent;onClicked:root.action("delete_old_copy");}
-                        Text {width:parent.width;text:"Deletion is separate and only available after saved cutover verification, an OS reboot and the correct live bind. Snapshots may retain old data.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:"Deletion is separate and only available after saved cutover verification, an OS reboot and the correct live bind. Snapshots may retain old data.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                     }
                     Column {
-                        width:parent.width;spacing:Style.spacing.sm;visible:root.view==="progress"
-                        Text {width:parent.width;text:root.lastJob?root.lastJob.method+" · "+root.lastJob.state:"Waiting for the helper…";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Text {width:parent.width;text:"You can close this panel; the helper owns the operation. Copy → Verify → Switch → Test → Keep old copy. Interrupted work stays paused until you explicitly Continue or Undo.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="progress"
+                        Text {width:content.width;text:root.lastJob?root.lastJob.method+" · "+root.lastJob.state:"Waiting for the helper…";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:"You can close this panel; the helper owns the operation. Copy → Verify → Switch → Test → Keep old copy. Interrupted work stays paused until you explicitly Continue or Undo.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Repeater {model:root.moves.length;Button{required property int index;property var move:root.moves[index]||({});width:content.width;leftAlign:true;text:Model.display(move.source)+" · "+move.state;onClicked:root.selectMove(move);}}
                         Repeater {model:(root.storage.drives||[]).length;Text{required property int index;width:content.width;text:Model.display(root.storage.drives[index].name)+" · "+root.storage.drives[index].state;color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;textFormat:Text.PlainText;}}
                     }
                     PanelSeparator {}
-                    Text {width:parent.width;text:"j/k move · enter manage · a add · m move · r rescan · esc back/close";color:root.ink;opacity:0.6;font.family:Style.font.family;font.pixelSize:Style.font.caption;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                    Text {width:content.width;text:"j/k move · enter manage · a add · m move · r rescan · esc back/close";color:root.ink;opacity:0.6;font.family:Style.font.family;font.pixelSize:Style.font.caption;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                 }
             }
             ConfirmDialog {
