@@ -7,7 +7,7 @@ from topology import clean
 def main():
     import gi
     gi.require_version('Gtk','4.0')
-    from gi.repository import Gtk,Gio,GLib,Gdk
+    from gi.repository import Gtk,Gio,GLib,Gdk,GObject
     parser=argparse.ArgumentParser(description='Drives native recovery-secret agent')
     sub=parser.add_subparsers(dest='op',required=True)
     p=sub.add_parser('provision')
@@ -30,8 +30,14 @@ def main():
             buttons=Gtk.Box(spacing=10);box.append(buttons)
             copy=Gtk.Button(label='Copy');regen=Gtk.Button(label='Regenerate');buttons.append(copy);buttons.append(regen)
             def copy_value(_):
-                clipboard=Gdk.Display.get_default().get_clipboard();clipboard.set_text(secret.get_text())
-                copy.set_label('Copied')
+                clipboard=Gdk.Display.get_default().get_clipboard()
+                value=GObject.Value();value.init(str);value.set_string(secret.get_text())
+                provider=Gdk.ContentProvider.new_union([Gdk.ContentProvider.new_for_value(value),Gdk.ContentProvider.new_for_bytes('x-kde-passwordManagerHint',GLib.Bytes.new(b'1'))])
+                clipboard.set_content(provider);copy.set_label('Copied · 20s')
+                def clear_owned():
+                    if clipboard.get_content()==provider:clipboard.set_content(None)
+                    copy.set_label('Copy');return False
+                GLib.timeout_add_seconds(20,clear_owned)
             copy.connect('clicked',copy_value);regen.connect('clicked',lambda _:secret.set_text(secrets.token_urlsafe(32)))
         message=Gtk.Label(label='',xalign=0,wrap=True);box.append(message)
         actions=Gtk.Box(spacing=10,halign=Gtk.Align.END);cancel=Gtk.Button(label='Cancel');submit=Gtk.Button(label='Encrypt & set up' if a.op=='provision' else 'Unlock');submit.add_css_class('suggested-action');actions.append(cancel);actions.append(submit);box.append(actions)

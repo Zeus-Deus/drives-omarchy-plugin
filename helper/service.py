@@ -4,8 +4,8 @@ from helper.common import Common,Failure
 from helper.moves import MoveManager,ACTIVE
 
 BUS='io.github.zeus_deus.Drives';OBJECT='/io/github/zeus_deus/Drives'
-ACTIONS={'ProvisionDrive':'provision','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export'}
-SIGNATURES={'ProvisionDrive':'sh','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','Status':''}
+ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export'}
+SIGNATURES={'ProvisionDrive':'sh','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','Status':''}
 XML='<node><interface name="'+BUS+'">'+''.join('<method name="'+m+'">'+''.join('<arg type="'+s+'" direction="in"/>' for s in signature)+'<arg type="s" direction="out"/></method>' for m,signature in SIGNATURES.items())+'</interface></node>'
 
 def read_secret_fd(fd):
@@ -21,7 +21,10 @@ def read_secret_fd(fd):
 
 class Server:
     def __init__(self,common=None):
-        self.c=common or Common();self.worker_lock=threading.Lock();self.jobs=[];self.connection=None
+        self.c=common or Common();self.worker_lock=threading.Lock();self.draining=False;self.connection=None
+        self.jobs=sorted(self.c.records('jobs'),key=lambda j:j['started'])[-24:]
+        for job in self.jobs:
+            if job['state']=='running':job['state']='paused';job['error']='Interrupted helper job; inspect before explicitly continuing.'
     def authorize(self,sender,method):
         from gi.repository import Gio,GLib
         action='io.github.zeus-deus.drives.'+ACTIONS[method]
@@ -41,14 +44,21 @@ class Server:
                     m['state']=m['interruptedState'];m['error']=''
         return {'ok':True,'version':'0.1.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None):
+        if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
         job={'id':uuid.uuid4().hex,'method':method,'state':'running','started':time.time()};self.jobs.append(job);self.jobs=self.jobs[-24:]
+        self.c.journal('jobs',job['id'],job)
+        for old in self.c.records('jobs'):
+            if old['id'] not in {j['id'] for j in self.jobs}:self.c.path('jobs',old['id']).unlink()
         def work():
             try:
                 manager=MoveManager(self.c,uid=None if uid==0 else uid)
                 if method=='ProvisionDrive':
                     from helper.provisioning import provision
                     result=provision(args[0],secret,self.c)
+                elif method=='ResumeDrive':
+                    from helper.provisioning import resume
+                    result=resume(args[0],self.c)
                 elif method=='StartMove':result=manager.start(*args)
                 elif method=='ExportHeaderBackup':
                     from helper.provisioning import export_header
@@ -57,9 +67,14 @@ class Server:
                     name={'ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete_old','CancelMove':'cancel','RestartMove':'restart'}[method]
                     result=getattr(manager,name)(args[0])
                 job['state']='done';job['result']=result
+                if method in ('ProvisionDrive','ResumeDrive'):self.draining=True
             except BaseException as exc:
                 job['state']='failed';job['error']=str(exc)[:300]
-            finally:self.worker_lock.release()
+            finally:
+                self.c.journal('jobs',job['id'],job);self.worker_lock.release()
+                if self.draining:
+                    from gi.repository import GLib
+                    GLib.timeout_add(750,lambda:os._exit(75))
         threading.Thread(target=work,daemon=True).start()
         return {'ok':True,'jobId':job['id']}
     def dispatch(self,connection,sender,object_path,interface,method,parameters,invocation):

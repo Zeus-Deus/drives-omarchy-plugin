@@ -22,7 +22,73 @@ Writes authorize caller unique bus name against polkit with `AllowUserInteractio
 ## Moves
 `helper/moves.py`: `MoveManager(common)` with methods `start(src,destMount)`, `resume(id)`, `rollback(id)`, `delete_old(id)`, `cancel(id)`, `restart(id)`, `inspect()`; operations return dict. Caller authorization is service responsibility; manager independently validates paths, mount topology, UID/protected paths, open FDs, unreadable ownership subtrees, nested mounts, encrypted destination with >=1.2x source size, target unique. Deny profiles/credentials/databases/system paths and symlinked ancestors. ACL/hardlink/xattr/sparse/odd-byte fidelity uses rsync -aHAXS --numeric-ids. Verify checksum dry run + metadata and counts, no silent skip. Git worktree references must remain valid through the unchanged source bind path or be safely repaired. Never execute arbitrary consuming-app shell command from caller.
 
-States fsync + atomic rename + directory fsync before acting: planned -> copying -> verifying -> switching -> testing -> switched (verified flag) -> rebooted -> cleaning -> cleaned; paused, rolled-back. Store source/backup/destination device+inode identities and boot_id plus verified cutover result. Startup only inspects, no mutation action; reported interrupted jobs are paused. Reboot check can update verified metadata only after checking new boot + correct bind active. Source is renamed to .pre-move, immutable mode-000 empty placeholder, bind, owned fstab block; rollback removes only owned config lines, bind, restores original. Recheck before destructive action. Cleanup only after verified cutover + rebooted + correct live bind; confirm UI defaults Cancel; no promise of reclaimed space if snapshots pin data. Cancellation before switch leaves original intact. Post-switch rollback must refuse if destination diverged from stored cutover baseline (never silently lose new files).
+The legacy live-copy/cutover procedure is disabled: new normal-session moves journal `awaiting-maintenance` with the original still in use and `verified=false`. Legacy live verification never authorizes cleanup, even after a reboot. Interrupted legacy switches keep both copies and require explicit maintenance inspection; no journal is silently upgraded. Protocol 2 is reserved for the new offline/quarantine implementation and is currently refused, not treated as qualified functionality. Cancel/Start over additionally require a pre-switch phase, an unchanged original, no saved cutover/placeholder/verification and no active bind: a missing backup alone never makes the destination disposable. Legacy normal-session Undo is disabled as well; it retains both copies for maintenance inspection. The internal quarantine primitives now reject outside regular-file and symlink hardlinks, prepare a durable root-private store on the same filesystem/subvolume, and rename the original without replacing any existing entry while preserving inode/owner/mode/mtime. They do not authorize exclusion, run automatically, or provide a public cutover path. Final offline copy, bind activation, rollback and cleanup must obey the maintenance contract below. Journals remain fsync + atomic rename + directory fsync before actions; startup inspects only. Keep source, destination, parent and quarantine filesystem/subvolume/inode identities plus a cutover boot ID and saved verification. Post-switch rollback must refuse destination divergence rather than discard new files; cleanup never promises reclaimed space if snapshots retain old data.
+
+## Maintenance-mode migration (approved scope revision)
+
+Ordinary-folder cutover requires explicit downtime. A live copy is only a seed;
+it never authorizes activation or cleanup. Normal-session StartMove prepares a
+journal and returns `awaiting-maintenance`, without renaming the live source.
+An independently authorized maintenance request selects the pending journal;
+users save work and reboot deliberately. The plugin never silently logs out,
+kills applications, or isolates a live desktop target.
+
+A root-owned early systemd generator reads the root-filesystem latch
+`/drives-maintenance-request.json` and selects the dedicated maintenance target
+before the graphical target, user managers, timers, containers or ordinary
+writer services can start. Inaccessible/missing `/var` journals must never hide
+a root boot latch: hold the gate closed and require administrative inspection.
+The gate survives reboot until explicitly released.
+Boot performs inspection only: no copy, resume, rollback or cleanup is automatic.
+The maintenance console requires a separate explicit action for Continue/Undo.
+The helper must verify the boot receipt, selected journal, minimal service
+allowlist, absence of user sessions/writers, and current storage identity.
+Open-descriptor/mapping scans are additional diagnostics, not writer exclusion.
+
+Current implementation adds an explicitly started, read-only
+`drives-maintenance-audit.service` (no boot enablement). It checks the selected
+root-private latch/receipt against the current boot, actual target dependencies
+and masks, pending systemd jobs, services/sockets/timers/paths, session records,
+and process UID/executable/cgroup identity. Its observation is not a maintained
+writer lease and is not connected to migration. The installed service refuses
+an ordinary guest boot without changing fstab/crypttab, the helper PID or the
+running desktop. A guest cold-boot test of the installed service also accepts
+an inspect-only maintenance snapshot. A dedicated, bounded
+`drives-maintenance-splash.service` quits and waits for the initramfs boot screen
+before the minimal target; it does not pull normal boot targets or admit a
+residual/deleted Plymouth executable. The test uses a QA-only boot trigger and
+UART reporting/recovery, preserves the source and journal, and does not grant a
+writer lease. Current packaging also installs a standalone normal-boot guard
+and persistent `sysinit.target` Requires/After drop-in. It checks only the
+presence of root latch/runtime controls (including malformed/dangling entries),
+without helper imports or journal parsing. Missing guard program or generator
+must retain the normal-boot failure barrier. This is a once-per-normal-boot
+check, never a way to isolate an already-running session or establish a writer
+lease. Maintained activation exclusion, storage admission and the actual offline
+worker remain unqualified. Earlier inspect-only target probes alone do not
+qualify the audit.
+The explicit uninstaller refuses any root latch or maintenance runtime entry
+(even empty, malformed or dangling), and any maintenance target state other than inactive. It checks
+again after stopping the ordinary helper, before disabling it or removing the
+recovery units/generator. A refused late request can leave the helper stopped,
+with its enabled unit and recovery files retained. Quiet uninstall removes only
+owned infrastructure; journals, keys and storage configuration remain. This is
+not a mechanism for releasing a maintenance gate or establishing exclusion.
+
+Under exclusion, the source moves to a same-filesystem root-private quarantine
+with stable root-controlled ancestry. Reject external hardlinks (including
+hardlinked symlinks), nested mounts and unsupported fidelity. Copy/reconcile and
+fully verify the quarantined original before exposing the destination. Save the
+post-exclusion verification, fsync destination data/metadata, then activate and
+verify the bind. Keep quarantine inaccessible through normal boot until a
+separately confirmed cleanup after reboot. Ambiguous crash recovery keeps the
+gate closed and both copies retained. Rollback requires exclusion and refuses
+post-cutover destination divergence. No containing-home snapshot may silently
+include unrelated profiles or credentials.
+
+Maintenance support is not qualified until real guest boot exclusion, explicit
+recovery, late-write preservation and the revised crash matrix pass. The prior
+normal-session migration proof does not establish this stronger contract.
 
 ## Tests/evidence
 Strict vertical TDD; RED then GREEN logs. All executable gates inside VM with boot identity recorded. Evidence directory is managed session artifact dir (provided by parent). All root storage operations only guest; QMP attachment/reset approved only for own VM. Tests cannot introduce production auth bypasses. Read-only tests no polkit; privileged VM fixture setup may use guest sudo, but real E2E must additionally verify D-Bus auth behavior and GTK handoff. Report unavailable encrypted-OS qualification separately (stock Realm OS root is plaintext Btrfs). No publication without explicit request. Commit only own files, no AI author attribution; parent owns integration commits.

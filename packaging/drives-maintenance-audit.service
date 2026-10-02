@@ -1,0 +1,20 @@
+[Unit]
+Description=Drives read-only maintenance admission audit
+DefaultDependencies=no
+After=drives-maintenance.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/lib/drives-helper
+ExecStart=/usr/bin/python3 -B -m helper.maintenance_audit
+TimeoutStartSec=45
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE

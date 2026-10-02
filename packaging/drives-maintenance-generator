@@ -1,0 +1,12 @@
+#!/bin/sh
+# systemd supplies normal, early and late output directories.
+/usr/bin/python3 -B -c 'import sys; sys.path.insert(0,"/usr/lib/drives-helper"); from helper.maintenance import generate; generate(sys.argv[2])' "$@" && exit 0
+# Import/interpreter/receipt failures must not hide an existing root latch.
+# Only runtime generator output is touched; never release a persistent latch.
+if [ -e /drives-maintenance-request.json ] || [ -L /drives-maintenance-request.json ]; then
+    /usr/bin/ln -sfn /etc/systemd/system/drives-maintenance.target "$2/default.target"
+    for unit in graphical.target multi-user.target user@.service timers.target paths.target sockets.target display-manager.service; do
+        /usr/bin/ln -sfn /dev/null "$2/$unit"
+    done
+fi
+exit 0

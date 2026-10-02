@@ -67,8 +67,9 @@ def atomic(path,data,mode=0o600):
 
 def boot_id():return pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 
-def mount_rows():
-    data=read_regular('/proc/1/mountinfo' if os.geteuid()==0 else '/proc/self/mountinfo').decode()
+def mount_rows(scope='host'):
+    if scope not in ('host','self'):raise Failure('invalid mount namespace scope')
+    data=read_regular('/proc/1/mountinfo' if os.geteuid()==0 and scope=='host' else '/proc/self/mountinfo').decode()
     def unescape(s):return re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),s)
     rows=[]
     for line in data.splitlines():
@@ -93,12 +94,12 @@ class Common:
         self.state_dir=pathlib.Path(state_dir)
         if self.state_dir.is_symlink():raise Failure('unsafe state directory')
         self.state_dir.mkdir(mode=0o700,parents=True,exist_ok=True)
-        for kind in ('moves','drives'):
+        for kind in ('moves','drives','jobs'):
             p=self.state_dir/kind
             if p.is_symlink():raise Failure('unsafe journal directory')
             p.mkdir(mode=0o700,exist_ok=True)
     def path(self,kind,id):
-        if kind not in ('moves','drives') or not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid journal id')
+        if kind not in ('moves','drives','jobs') or not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid journal id')
         return self.state_dir/kind/(id+'.json')
     def journal(self,kind,id,value):
         atomic(self.path(kind,id),json.dumps(value,ensure_ascii=True,separators=(',',':')).encode())
@@ -113,19 +114,33 @@ class Common:
         path=pathlib.Path(path)
         if str(path) not in ('/etc/fstab','/etc/crypttab'):raise Failure('invalid configuration file')
         if not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid configuration owner')
-        content=read_regular(path).decode() if path.exists() else ''
-        marker='# drives-helper '+id
-        before=content.splitlines(keepends=True);after=[];skip=False
-        for row in before:
-            if row.rstrip('\n')==marker:skip=True;continue
-            if skip:skip=False;continue
-            after.append(row)
-        if line is not None:
-            if '\n' in line or '\0' in line:raise Failure('invalid configuration line')
-            after.extend(['\n'+marker+'\n',line+'\n'])
-        backup=self.state_dir/(path.name+'.'+uuid.uuid4().hex+'.backup')
-        atomic(backup,content.encode())
-        atomic(path,''.join(after).encode(),0o644 if path.name=='fstab' else 0o600)
+        if self.state_dir != pathlib.Path('/var/lib/drives-helper'):raise Failure('system config disabled for custom state directory')
+        if line is not None and (len(line)>4096 or '\n' in line or '\0' in line):raise Failure('invalid configuration line')
+        request=self.state_dir/('config-request-'+uuid.uuid4().hex+'.json')
+        atomic(request,json.dumps({'kind':path.name,'id':id,'line':line}).encode())
+        run(['systemd-run','--quiet','--wait','--collect','--pipe',
+            '--unit=drives-config-'+uuid.uuid4().hex,
+            '--property=WorkingDirectory=/usr/lib/drives-helper',
+            '--property=ProtectSystem=strict',
+            '--property=ReadWritePaths=/etc /var/lib/drives-helper',
+            '--property=ReadOnlyPaths=/etc/passwd /etc/shadow -/etc/sudoers -/etc/polkit-1 /etc/systemd /etc/dbus-1 /etc/cryptsetup-keys.d',
+            '--property=ProtectHome=yes','--property=PrivateTmp=yes',
+            '--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE',
+            '/usr/bin/python3','-B','-m','helper.configwriter',request.name],timeout=60)
+
+def prepare_mountpoint(path):
+    from helper.mountpoint import validate
+    validate(path)
+    # /dataN may not exist when the long-lived strict namespace starts.
+    # Only this fixed directory worker gets a fresh namespace writable at /.
+    run(['systemd-run','--quiet','--wait','--collect','--pipe',
+        '--unit=drives-placeholder-'+uuid.uuid4().hex,
+        '--property=WorkingDirectory=/usr/lib/drives-helper',
+        '--property=ProtectSystem=full',
+        '--property=ReadOnlyPaths=/var /home /root /run /dev /proc /sys',
+        '--property=NoNewPrivileges=yes','--property=PrivateTmp=yes',
+        '--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_LINUX_IMMUTABLE',
+        '/usr/bin/python3','-B','-m','helper.mountpoint',path],timeout=60)
 
 def escape_fstab(path):
     if '\0' in path or '\n' in path:raise Failure('path cannot be represented in fstab')

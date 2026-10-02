@@ -1,7 +1,9 @@
 """Guarded drive provisioning. Existing LUKS headers are never reformatted."""
 import os,pathlib,re,stat,time,uuid,json
-from helper.common import Failure,run,atomic,mount_rows,read_regular,escape_fstab
+from helper.common import Failure,run,atomic,mount_rows,read_regular,escape_fstab,prepare_mountpoint
 from topology import snapshot,blocks,chains,probe
+
+from helper.driveconfig import finish
 
 FIELDS={'byId','serial','name','mountpoint','erase','confirmation','autoUnlock'}
 def validate_request(req):
@@ -13,7 +15,7 @@ def validate_request(req):
     if not req['byId'].startswith('/dev/disk/by-id/') or pathlib.Path(req['byId']).name in ('.','..'):raise Failure('stable disk by-id is required')
     p=pathlib.Path(req['mountpoint'])
     if not req['mountpoint'].startswith('/') or str(p)!=req['mountpoint'] or '..' in p.parts or '\n' in str(p) or '\0' in str(p):raise Failure('invalid mountpoint')
-    if not (re.fullmatch('/data[0-9]*',str(p)) or str(p).startswith('/mnt/drives/')):raise Failure('mountpoint must be /data, /dataN or under /mnt/drives/')
+    if not (re.fullmatch('/data[0-9]*',str(p)) or re.fullmatch('/mnt/drives/[a-zA-Z0-9/_-]+',str(p))):raise Failure('mountpoint must be /data, /dataN or under /mnt/drives/')
     return req
 
 def udisks_call(path,interface,method,signature,args,timeout=180000):
@@ -57,14 +59,15 @@ def provision(request,secret,common):
     if os.path.lexists('/dev/mapper/'+req['name']):raise Failure('mapper name already exists')
     keypath=pathlib.Path('/etc/cryptsetup-keys.d')/(req['name']+'.key')
     if os.path.lexists(keypath):raise Failure('keyfile name already exists')
+    prepare_mountpoint(str(mountpoint))
     id=uuid.uuid4().hex;j={**req,'id':id,'state':'planned','boot_id':common.boot_id(),'created':time.time(),'testFixture':testing}
-    def stage(value):j['state']=value;common.journal('drives',id,j)
+    def stage(value):j['state']=value;j['updated']=time.time();common.journal('drives',id,j)
     try:
         stage('partitioning')
         # UDisks owns GPT creation and the encrypted filesystem format.
         from gi.repository import GLib
         obj=block_object(device)
-        udisks_call(obj,'Block','Format','(sa{sv})',('gpt',{'erase':GLib.Variant('s','') }))
+        udisks_call(obj,'Block','Format','(sa{sv})',('gpt',{}))
         part_obj=udisks_call(obj,'PartitionTable','CreatePartition','(ttssa{sv})',(1024*1024,0,'','Drives data',{}))[0]
         run(['udevadm','settle']);part=device+('p1' if device[-1].isdigit() else '1');j['partition']=part
         stage('encrypting')
@@ -79,8 +82,9 @@ def provision(request,secret,common):
         run(['cryptsetup','luksAddKey','--key-file','-',part,str(keypath)],data=secret,timeout=180)
         run(['cryptsetup','open','--test-passphrase','--key-file',str(keypath),part],timeout=180)
         run(['cryptsetup','open','--test-passphrase','--key-file','-',part],data=secret,timeout=180)
-        descendants=chains(blocks());mapper=next((name for name,cs in descendants.items() if any(c[-1]['type']=='crypt' and any(n['name']==part for n in c) for c in cs)),None)
+        descendants=chains(blocks());mapper=next((c[-1]['name'] for cs in descendants.values() for c in cs if c[-1]['type']=='crypt' and any(n['name']==part for n in c)),None)
         if mapper:run(['cryptsetup','close',os.path.basename(mapper)])
+        j['keyfile']=str(keypath);j['header']=str(common.state_dir/'drives'/(id+'.header'))
         stage('formatted');run(['cryptsetup','open','--key-file',str(keypath),part,req['name']],timeout=180)
         mapper='/dev/mapper/'+req['name']
         filesystem=run(['blkid','-s','TYPE','-o','value',mapper]).strip()
@@ -88,25 +92,23 @@ def provision(request,secret,common):
         header=common.state_dir/'drives'/(id+'.header')
         run(['cryptsetup','luksHeaderBackup',part,'--header-backup-file',str(header)],timeout=60);os.chmod(header,0o600)
         j['header']=str(header);j['keyfile']=str(keypath);stage('configuring')
-        mountpoint.mkdir(mode=0o000,parents=True,exist_ok=True);os.chmod(mountpoint,0o000);run(['chattr','+i',str(mountpoint)])
-        uuid_value=run(['blkid','-s','UUID','-o','value',part]).decode().strip()
-        if req['autoUnlock']:
-            common.config('/etc/crypttab',id,req['name']+' UUID='+uuid_value+' '+str(keypath)+' luks,nofail,headless=yes')
-            common.config('/etc/fstab',id,mapper+' '+escape_fstab(str(mountpoint))+' btrfs compress=zstd:3,nodiscard,nofail,x-systemd.automount,x-systemd.device-timeout=30s 0 0')
-            run(['cryptsetup','close',req['name']]);run(['systemctl','daemon-reload'])
-            crypt_unit=run(['systemd-escape','--template=systemd-cryptsetup@.service',req['name']]).decode().strip()
-            mount_unit=run(['systemd-escape','--path','--suffix=mount',str(mountpoint)]).decode().strip()
-            run(['systemctl','start',crypt_unit],timeout=60);run(['systemctl','start',mount_unit],timeout=60)
-        else:
-            # Manual mode still has no saved user secret; PID1 mounts in the host namespace.
-            mount_unit=run(['systemd-escape','--path','--suffix=mount',str(mountpoint)]).decode().strip()
-            from helper.common import host_mount
-            host_mount(mapper,str(mountpoint),'btrfs','compress=zstd:3,nodiscard')
-            keypath.unlink();j['keyfile']=None
-        proof=mountpoint/('.drives-proof-'+id);proof.write_bytes(b'encrypted mount verification');assert proof.read_bytes()==b'encrypted mount verification';proof.unlink()
-        stage('ready');return {'ok':True,'id':id,'state':'ready','offMachineHeaderBackupNeeded':True}
+        return finish(j,common)
     except BaseException as exc:
-        j['interruptedState']=j['state'];j['error']=str(exc)[:300];stage('unfinished');raise
+        if common.path('drives',id).exists():j=common.read('drives',id)
+        j['interruptedState']=j.get('interruptedState',j['state']) if j['state']=='unfinished' else j['state']
+        j['error']=str(exc)[:300];stage('unfinished');raise
+
+
+def resume(id,common):
+    j=common.read('drives',id)
+    if j['state']=='ready':return {'ok':True,'id':id,'state':'ready'}
+    eligible=j.get('interruptedState') if j['state']=='unfinished' else j['state']
+    if eligible not in ('formatted','configuring','finalizing'):raise Failure('unsafe stage: inspect the existing header; never format it again')
+    try:return finish(j,common)
+    except BaseException as exc:
+        durable=common.read('drives',id)
+        durable['interruptedState']=durable.get('interruptedState',eligible) if durable['state']=='unfinished' else durable['state']
+        durable['state']='unfinished';durable['error']=str(exc)[:300];common.journal('drives',id,durable);raise
 
 
 def export_header(name,destination,common,uid):

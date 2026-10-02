@@ -17,7 +17,7 @@ def handle(req):
         result['mounts']=[m for m in result['mounts'] if m['source'].startswith('/dev/') or m['fstype']=='autofs' and m['target'].startswith(('/data','/mnt/drives'))]
         return result
     if op=='probe':return {'ok':True,**probe(req.get('path',''))}
-    methods={'start_move':('StartMove',('src','destMount')),'resume_move':('ResumeMove',('id',)),
+    methods={'start_move':('StartMove',('src','destMount')),'resume_drive':('ResumeDrive',('id',)),'resume_move':('ResumeMove',('id',)),
         'rollback_move':('RollbackMove',('id',)),'delete_old_copy':('DeleteOldCopy',('id',)),
         'cancel_move':('CancelMove',('id',)),'restart_move':('RestartMove',('id',)),
         'export_header':('ExportHeaderBackup',('name','destination'))}

@@ -18,6 +18,6 @@ def test_each_mutator_has_separate_auth_admin_policy():
     import xml.etree.ElementTree as ET
     policy=ET.parse(ROOT/'packaging/io.github.zeus-deus.drives.policy')
     actions=policy.findall('action')
-    assert len(actions)==8
+    assert len(actions)==9
     assert all(a.find('defaults/allow_active').text=='auth_admin' for a in actions)
-    assert len({a.attrib['id'] for a in actions})==8
+    assert len({a.attrib['id'] for a in actions})==9

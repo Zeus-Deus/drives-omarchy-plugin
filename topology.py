@@ -11,7 +11,8 @@ def blocks():
 def chains(block):
     result={}
     def visit(node,parents):
-        chain=parents+[node];result.setdefault(node['name'],[]).append(chain)
+        chain=parents+[node]
+        for name in dict.fromkeys([node['name'],os.path.realpath(node['name'])]):result.setdefault(name,[]).append(chain)
         for child in node.get('children',[]):visit(child,chain)
     for root in block.get('blockdevices',[]):visit(root,[])
     return result
@@ -24,7 +25,7 @@ def by_id(name):
         except OSError:continue
     return sorted(entries,key=lambda p:(not ('wwn-' in p or 'nvme-eui.' in p),p))[0] if entries else ''
 
-def device_source(mount):return re.sub(r'\[.*\]$','',mount['source'])
+def device_source(mount):return os.path.realpath(re.sub(r'\[.*\]$','',mount['source']))
 
 def probe(path,block=None,mounts=None,resolve=True):
     if resolve:path=os.path.realpath(path,strict=True)
@@ -32,7 +33,11 @@ def probe(path,block=None,mounts=None,resolve=True):
     mount=mount_for(path,mounts);candidates=chains(block).get(device_source(mount),[])
     if mount['fstype']=='autofs':return {'path':path,'mount':mount,'supported':False,'reason':'automount is inactive; no access triggered'}
     allowed={'disk','part','crypt'}
-    supported=len(candidates)==1 and all(n['type'] in allowed for n in candidates[0])
+    supported=len(candidates)==1 and candidates[0][0]['type']=='disk' and all(n['type'] in allowed for n in candidates[0])
+    if supported:
+        fsuuid=candidates[0][-1].get('uuid')
+        members={c[0]['name'] for cs in chains(block).values() for c in cs if fsuuid and c[-1].get('uuid')==fsuuid and c[-1].get('fstype')=='btrfs'}
+        if len(members)>1:supported=False
     if supported:
         chain=candidates[0];disk=chain[0];encrypted=any(n['type']=='crypt' for n in chain)
         return {'path':path,'mount':mount,'supported':True,'encrypted':encrypted,'disk':disk,'chain':chain}
@@ -40,20 +45,29 @@ def probe(path,block=None,mounts=None,resolve=True):
 
 def classify(block,mounts,usage):
     indexed=chains(block)
-    system=set()
+    system=set();systemUUIDs=set()
     for mount in mounts:
         if mount['target'] in ('/','/boot','/home','/usr','/var'):
-            for chain in indexed.get(device_source(mount),[]):system.add(chain[0]['name'])
+            for chain in indexed.get(device_source(mount),[]):
+                system.add(chain[0]['name'])
+                if chain[-1].get('uuid'):systemUUIDs.add(chain[-1]['uuid'])
+    for cs in indexed.values():
+        for chain in cs:
+            if chain[-1].get('uuid') in systemUUIDs:system.add(chain[0]['name'])
     out=[]
     for disk in block.get('blockdevices',[]):
         if disk.get('type')!='disk' or disk['name'].startswith('/dev/zram'):continue
         related=[chain for cs in indexed.values() for chain in cs if chain[0]['name']==disk['name']]
-        names={c[-1]['name'] for c in related}
+        names={os.path.realpath(c[-1]['name']) for c in related}
         volume_mounts=[m for m in mounts if device_source(m) in names and m['fstype']!='autofs']
         crypt=any(n.get('type')=='crypt' or n.get('fstype')=='crypto_LUKS' for c in related for n in c)
         open_crypt=any(n.get('type')=='crypt' for c in related for n in c)
         ident=disk.get('wwn') or disk.get('serial') or by_id(disk['name']) or disk['name']
         supported=all(n.get('type') in ('disk','part','crypt') for c in related for n in c)
+        for c in related:
+            fsuuid=c[-1].get('uuid')
+            members={a[0]['name'] for cs in indexed.values() for a in cs if fsuuid and a[-1].get('uuid')==fsuuid and a[-1].get('fstype')=='btrfs'}
+            if len(members)>1:supported=False
         path=by_id(disk['name'])
         out.append({'id':ident,'byId':path,'name':disk['name'],'model':clean(disk.get('model') or 'System drive'),'serial':disk.get('serial') or '',
             'displaySerial':clean(disk.get('serial')),'encryptedObject':next(('/org/freedesktop/UDisks2/block_devices/'+''.join(ch if ch.isalnum() else '_%02x'%ord(ch) for ch in os.path.basename(c[-1]['name'])) for c in related if c[-1].get('fstype')=='crypto_LUKS'),''),'size':int(disk.get('size') or 0),'system':disk['name'] in system,'encrypted':crypt,

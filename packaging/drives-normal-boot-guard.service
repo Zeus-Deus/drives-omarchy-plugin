@@ -1,0 +1,15 @@
+[Unit]
+Description=Retain normal-boot barrier while Drives maintenance is armed
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecStart=/usr/bin/python3 -I -B /usr/lib/drives-helper/normal_boot_guard.py
+TimeoutStartSec=15
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+CapabilityBoundingSet=

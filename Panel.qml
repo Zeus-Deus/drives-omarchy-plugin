@@ -40,6 +40,7 @@ BarWidget {
     function ask(message,action) { confirmationAction=action;confirm.message=message;confirm.selectedIndex=0;confirm.opened=true;confirm.forceActiveFocus(); }
     function selectDisk(disk) { selectedDiskId=disk.id;go(disk.state==="new"?"add":"manage"); }
     function selectMove(move) {selectedMoveId=move.id;go("resume");}
+    onChosenDiskChanged: if(view==="add" && chosenDisk && !chosenDisk.selectable) go("manage")
     function moveCursor(dy) {
         var n=view==="overview"?disks.length+moves.length:disks.length;
         cursor=Math.max(0,Math.min(Math.max(0,n-1),cursor+dy));
@@ -202,6 +203,7 @@ BarWidget {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="manage" && root.chosenDisk!==null
                         Text {width:content.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · SMART: not checked":"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Text {width:content.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked";text:"Disk is present but locked. Missing keyfile or a new OS? Use the recovery passphrase. No secret is entered in this panel.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Button {text:"Continue existing drive setup…";visible:root.chosenDisk && (root.storage.drives||[]).some(function(d){return d.serial===root.chosenDisk.serial && d.state!=="ready";});onClicked:{var ds=root.storage.drives||[];for(var i=0;i<ds.length;i++)if(ds[i].serial===root.chosenDisk.serial)service.submit({op:"resume_drive",id:ds[i].id});}}
                         Button {text:"Unlock with recovery passphrase…";visible:root.chosenDisk&&root.chosenDisk.state==="locked";enabled:root.chosenDisk && root.chosenDisk.encryptedObject;onClicked:service.launch(["unlock","--device",root.chosenDisk.encryptedObject]);}
                         TextField {id:exportField;width:content.width;placeholderText:"Absolute header-export path in your home";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         Button {text:"Export header backup…";enabled:root.storage.helperAvailable && exportField.text!=="";onClicked:{var d=root.storage.drives||[];for(var i=0;i<d.length;i++)if(d[i].serial===root.chosenDisk.serial)service.submit({op:"export_header",name:d[i].name,destination:exportField.text});}}

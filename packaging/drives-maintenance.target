@@ -1,0 +1,7 @@
+[Unit]
+Description=Drives inspect-only maintenance boot
+DefaultDependencies=no
+Requires=systemd-remount-fs.service systemd-journald.service systemd-udevd.service drives-maintenance-splash.service
+After=systemd-remount-fs.service systemd-journald.service systemd-udevd.service drives-maintenance-splash.service
+Conflicts=shutdown.target
+Before=shutdown.target
