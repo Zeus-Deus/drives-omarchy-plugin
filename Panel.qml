@@ -226,7 +226,13 @@ BarWidget {
                         Text {width:content.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · SMART: not checked":"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Text {width:content.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked";text:"Disk is present but locked. Missing keyfile or a new OS? Use the recovery passphrase. No secret is entered in this panel.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Button {text:"Continue existing drive setup…";visible:root.chosenDisk && (root.storage.drives||[]).some(function(d){return d.serial===root.chosenDisk.serial && d.state!=="ready";});onClicked:{var ds=root.storage.drives||[];for(var i=0;i<ds.length;i++)if(ds[i].serial===root.chosenDisk.serial)service.submit({op:"resume_drive",id:ds[i].id});}}
-                        Button {text:"Unlock with recovery passphrase…";visible:root.chosenDisk&&root.chosenDisk.state==="locked";enabled:root.chosenDisk && root.chosenDisk.encryptedObject;onClicked:service.launch(["unlock","--device",root.chosenDisk.encryptedObject]);}
+                        Button {
+                            readonly property var drive:root.chosenDisk?Model.configuredFor(root.chosenDisk,root.configuredDrives):null
+                            text:"Unlock with recovery passphrase…";visible:root.chosenDisk&&root.chosenDisk.state==="locked"
+                            enabled:drive!==null&&root.storage.helperAvailable
+                            onClicked:service.launch(["unlock","--drive",drive.id,"--label",Model.display(drive.name)+" · "+Model.display(drive.mountpoint)])
+                        }
+                        Text {width:content.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked"&&Model.configuredFor(root.chosenDisk,root.configuredDrives)===null;text:"This encrypted disk was not set up by Drives on this computer, so it is not unlocked here.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         TextField {id:exportField;width:content.width;placeholderText:"Absolute header-export path in your home";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         Button {text:"Export header backup…";enabled:root.storage.helperAvailable && exportField.text!=="";onClicked:{var d=root.storage.drives||[];for(var i=0;i<d.length;i++)if(d[i].serial===root.chosenDisk.serial)service.submit({op:"export_header",name:d[i].name,destination:exportField.text});}}
                     }

@@ -38,7 +38,7 @@ def native_case(case):
     op='unlock' if case=='startup-unlock' else 'provision'
     sys.argv=['drives-agent',op]
     if op=='provision':sys.argv+=['--by-id','/dev/disk/by-id/GUI-NEVER-PROVISION','--serial','GUIFIXTURE0002','--name','gui-fixture','--mountpoint','/gui-fixture','--confirmation','0002','--manual']
-    else:sys.argv+=['--device','/org/freedesktop/UDisks2/block_devices/GUI_NEVER_UNLOCK']
+    else:sys.argv+=['--drive','f'*32,'--label','GUI fixture (never unlocked)']
     def forbidden(*args,**kwargs):raise AssertionError('native UI checks must not invoke storage')
     agent.call=forbidden
     if case=='accepted':agent.call=lambda *args,**kwargs:{'ok':True,'jobId':'UI-FIXTURE-ONLY'}

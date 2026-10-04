@@ -13,7 +13,7 @@ def main():
     p=sub.add_parser('provision')
     for arg in ('by-id','serial','name','mountpoint','confirmation'):p.add_argument('--'+arg,required=True)
     p.add_argument('--erase',action='store_true');p.add_argument('--manual',action='store_true')
-    u=sub.add_parser('unlock');u.add_argument('--device',required=True)
+    u=sub.add_parser('unlock');u.add_argument('--drive',required=True);u.add_argument('--label',default='')
     a=parser.parse_args()
     app=Gtk.Application(application_id='io.github.zeus_deus.Drives.Agent',flags=Gio.ApplicationFlags.NON_UNIQUE)
     def activate(app):
@@ -21,7 +21,7 @@ def main():
         win.set_default_size(520,380)
         box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin_top=24,margin_bottom=24,margin_start=24,margin_end=24);win.set_child(box)
         title=Gtk.Label(label='Encryption & recovery' if a.op=='provision' else 'Unlock encrypted drive',xalign=0);title.add_css_class('title-2');box.append(title)
-        detail=Gtk.Label(label=('Serial '+clean(a.serial)+' · '+clean(a.mountpoint)) if a.op=='provision' else clean(a.device),xalign=0,wrap=True);box.append(detail)
+        detail=Gtk.Label(label=('Serial '+clean(a.serial)+' · '+clean(a.mountpoint)) if a.op=='provision' else (clean(a.label) or 'Configured drive')+' · opens at its usual folder',xalign=0,wrap=True);box.append(detail)
         note=Gtk.Label(label='The recovery secret stays in this separate agent. It is never sent to the desktop panel.',xalign=0,wrap=True);note.add_css_class('dim-label');box.append(note)
         secret=Gtk.PasswordEntry(show_peek_icon=True,hexpand=True,placeholder_text='Recovery passphrase');box.append(secret)
         stored=Gtk.CheckButton(label='I have stored the recovery passphrase safely')
@@ -74,9 +74,10 @@ def main():
                         try:result=call('ProvisionDrive',(json.dumps(request),0),secret_fd=fd)
                         finally:os.close(fd)
                     else:
-                        bus=Gio.bus_get_sync(Gio.BusType.SYSTEM,None)
-                        bus.call_sync('org.freedesktop.UDisks2',a.device,'org.freedesktop.UDisks2.Encrypted','Unlock',GLib.Variant('(sa{sv})',(value.decode(),{})),None,Gio.DBusCallFlags.NONE,120000,None)
-                        result={'ok':True}
+                        # The helper opens it under its configured name and mounts its folder.
+                        fd=secret_memfd(value)
+                        try:result=call('UnlockDrive',(a.drive,0),secret_fd=fd)
+                        finally:os.close(fd)
                 except BaseException:result={'ok':False,'error':'Authorization or storage operation failed. No secret was logged.'}
                 GLib.idle_add(done,result)
             try:threading.Thread(target=work,daemon=True).start()

@@ -4,6 +4,7 @@ Each subcommand drives the REAL system D-Bus service and prints one JSON line.
 It refuses to run outside a KVM guest and only touches TEST* serial disks.
 
   provision <SERIAL> <name> <mountpoint>   ProvisionDrive with a generated recovery secret
+  unlock <name>                            UnlockDrive: wrong passphrase, then the saved recovery secret
   plan <src> <destMount>                   StartMove (normal session: plan only)
   request <moveId> continue|rollback       Resume/RollbackMove: arm the next-boot request
   cancel-request <moveId>                  CancelRestart
@@ -55,6 +56,12 @@ def main(argv):
         decoy=dict(request,confirmation='Y003')
         result={'decoyFragment':submit('ProvisionDrive',(json.dumps(decoy),0),secret)}
         result['job']=submit('ProvisionDrive',(json.dumps(request),0),secret)
+    elif op=='unlock':
+        # Recovery unlock with the secret saved at provisioning (root-private, guest only).
+        name=argv[1];record=next(d for d in status()['drives'] if d['name']==name)
+        wrong=submit('UnlockDrive',(record['id'],0),b'definitely-not-the-passphrase')
+        secret=(EVIDENCE/(name+'.recovery')).read_bytes()
+        result={'wrongPassphrase':wrong,'job':submit('UnlockDrive',(record['id'],0),secret)}
     elif op=='plan':result=submit('StartMove',(argv[1],argv[2]))
     elif op=='request':result=submit('ResumeMove' if argv[2]=='continue' else 'RollbackMove',(argv[1],))
     elif op=='cancel-request':result=submit('CancelRestart',(argv[1],))

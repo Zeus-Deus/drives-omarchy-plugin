@@ -111,6 +111,43 @@ def resume(id,common):
         durable['state']='unfinished';durable['error']=str(exc)[:300];common.journal('drives',id,durable);raise
 
 
+def unlock(id,secret,common):
+    """Recovery unlock for a configured drive whose keyfile is missing or not
+    used: open it under its configured mapper name, start its own mount unit
+    and reconnect folders moved onto it. Never formats or edits config."""
+    if not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid drive id')
+    if not 8<=len(secret)<=4096 or b'\0' in secret:raise Failure('invalid recovery passphrase')
+    j=common.read('drives',id)
+    if j.get('state')!='ready':raise Failure('drive setup is unfinished; continue setup instead')
+    name=j['name'];mapper='/dev/mapper/'+name
+    part=os.path.realpath(j.get('partitionById') or j['partition'],strict=True)
+    run(['cryptsetup','isLuks',part])
+    if j.get('luksUUID') and run(['cryptsetup','luksUUID',part]).decode().strip()!=j['luksUUID']:raise Failure('this is not the configured drive')
+    if os.path.exists(mapper):
+        if not any(any(n['name']==part for n in c) for c in chains(blocks()).get(mapper,[])):raise Failure('mapper name is used by another device')
+    else:
+        try:run(['cryptsetup','open','--key-file','-',part,name],data=secret,timeout=180)
+        except Failure:raise Failure('the recovery passphrase did not unlock this drive') from None
+    run(['udevadm','settle'],timeout=60)
+    mountpoint=j['mountpoint']
+    if not any(r['target']==mountpoint and r['fstype']=='btrfs' for r in mount_rows()):
+        if j.get('autoUnlock'):
+            unit=run(['systemd-escape','--path','--suffix=mount',mountpoint]).decode().strip()
+            run(['systemctl','start',unit],timeout=60)
+        else:
+            from helper.common import host_mount
+            host_mount(mapper,mountpoint,'btrfs','compress=zstd:3,nodiscard')
+    t=probe(mountpoint,resolve=False)
+    if not t['supported'] or t['mount']['target']!=mountpoint or t['disk'].get('serial')!=j['serial']:raise Failure('drive unlocked but its folder did not mount')
+    reconnected=[]
+    for move in common.records('moves'):
+        if move.get('destMount')!=mountpoint or move.get('state') not in ('switched','rebooted','cleaning','cleaned'):continue
+        unit=run(['systemd-escape','--path','--suffix=mount',move['source']]).decode().strip()
+        try:run(['systemctl','start',unit],timeout=60);reconnected.append(move['source'])
+        except Failure:pass
+    return {'ok':True,'id':id,'mountpoint':mountpoint,'reconnected':reconnected}
+
+
 def export_header(name,destination,common,uid):
     records=[r for r in common.records('drives') if r['name']==name and r.get('header')]
     if len(records)!=1:raise Failure('header backup not found')

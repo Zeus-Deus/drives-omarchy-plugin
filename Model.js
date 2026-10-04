@@ -36,6 +36,11 @@ function configuredDriveState(drive,disks) {
     }
     return "Not mounted";
 }
+// The ready Drives record for a present disk (exact by-id + serial), or null.
+function configuredFor(disk,drives) {
+    var m=(drives||[]).filter(function(d){return d.state==="ready"&&d.byId===disk.byId&&d.serial===disk.serial&&!!d.serial;});
+    return m.length===1?m[0]:null;
+}
 // Folder moves run during a restart (helper/offline.py). These two helpers are
 // the only place the panel decides what a move row says and offers.
 function moveStage(move,pending) {
