@@ -68,17 +68,23 @@ BarWidget {
         if(!autoToggle.checked)args.push("--manual");
         service.launch(args);
     }
+    readonly property var pendingRestart: storage.restartPending || null
     function startMove() {
         var src=sourceField.text,dest=destinationField.text;
-        ask("Move "+Model.display(src)+"?\nApps keep the same path through a bind mount. The original stays as .pre-move until you explicitly delete it after a reboot. Open files, protected data or unreadable subtrees block the move.",function(){service.submit({op:"start_move",src:src,destMount:dest});go("progress");});
+        ask("Plan moving "+Model.display(src)+" to "+Model.display(dest)+"?\nNothing changes yet. The move itself happens during a restart, when nothing else is using the folder. Apps keep using the same path afterwards.",function(){service.submit({op:"start_move",src:src,destMount:dest});go("progress");});
+    }
+    function restartNow() {
+        ask("Restart now?\nOpen windows are closed. The restart takes a little longer while the folder is handled, then your desktop comes back.",function(){close();Quickshell.execDetached(["omarchy-system-reboot"]);});
     }
     function action(op) {
         if(!chosenMove)return;
         var id=chosenMove.id;
-        var words={rollback_move:"Undo this move? Refused if new files differ from the old copy.",delete_old_copy:"Delete the old copy? Undo will no longer be possible. Btrfs snapshots may retain the data; reclaimed space is not guaranteed.",cancel_move:"Cancel and remove the partial destination copy? The original stays in use.",restart_move:"Remove the partial copy and start over?"};
+        if(op==="restart")return restartNow();
+        var words={resume_move:"Move this folder on the next restart?",rollback_move:"Undo this move on the next restart? It is refused if files changed after the move, so no work is lost.",delete_old_copy:"Delete the old copy? Undo will no longer be possible. Btrfs snapshots may retain the data; reclaimed space is not guaranteed.",cancel_move:"Cancel this move? The copy on the drive is removed and the original stays in use.",cancel_restart:"Keep the folder as it is and skip this on the next restart?"};
         if(words[op])ask(words[op],function(){service.submit({op:op,id:id});});
         else service.submit({op:op,id:id});
     }
+    readonly property var actionLabels: ({resume_move:"Move on next restart…",restart:"Restart now…",cancel_restart:"Don't do it on restart",rollback_move:"Undo move…",delete_old_copy:"Delete old copy…",cancel_move:"Cancel move…"})
     Service { id:service; onLaunching:root.close(); onFinished:function(result){if(result.jobId)root.go("progress");} }
     WidgetButton {
         id:button
@@ -189,11 +195,12 @@ BarWidget {
                                 required property int index
                                 property var move:root.moves[index]||({})
                                 width:content.width;leftAlign:true;hasCursor:root.cursor===root.disks.length+index
-                                text:Model.display(move.source)+"\n"+Model.display(move.state)+" · "+(move.bound?"bind active":move.oldCopyAvailable?"missing bind · locked placeholder":"original stays in use")
+                                text:Model.display(move.source)+" → "+Model.display(move.destMount)+"\n"+Model.moveText(move,root.pendingRestart)[0]
                                 onClicked:root.selectMove(move)
                             }
                         }
                         Text {visible:root.moves.length===0;text:"No folder moves. Your existing mounts are unchanged.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;textFormat:Text.PlainText}
+                        Button {visible:root.pendingRestart!==null && root.pendingRestart.valid===true;text:"Restart now to finish…";onClicked:root.restartNow()}
                         Row {spacing:Style.spacing.sm;Button{text:"+ Add drive";enabled:root.storage.helperAvailable;onClicked:root.go("add");}Button{text:"Move folder";enabled:root.storage.helperAvailable;onClicked:root.go("move");}}
                     }
                     Column {
@@ -209,7 +216,7 @@ BarWidget {
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="move"
-                        Text {width:content.width;text:"Copy → full checksum & metadata verify → bind → read/write test. Open files, nested mounts, profiles, credentials and unreadable subtrees block the move. Nothing is killed. Keep the old copy until a successful reboot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:"The folder moves during a restart, when nothing else can write to it: copy → check every file → the familiar path opens the drive. The old copy is kept until you delete it. Profiles, credentials, databases and unreadable files are refused, never skipped.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         TextField {id:sourceField;width:content.width;placeholderText:"Absolute source folder (e.g. ~/Videos expanded)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         TextField {id:destinationField;width:content.width;placeholderText:"Encrypted destination mount (e.g. /data)";onActiveFocusChanged:if(activeFocus)root.ensureVisible(this);Keys.onEscapePressed:catcher.forceActiveFocus();}
                         Button {text:"Review move…";enabled:root.storage.helperAvailable && sourceField.text!=="" && destinationField.text!=="" && !service.mutating;onClicked:root.startMove();}
@@ -225,19 +232,27 @@ BarWidget {
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="resume" && root.chosenMove!==null
-                        Text {width:content.width;text:root.chosenMove?Model.display(root.chosenMove.source)+" → "+Model.display(root.chosenMove.destMount)+"\n"+Model.display(root.chosenMove.state)+" · "+(root.chosenMove.bound?"bind active":"bind absent")+"\n"+Model.display(root.chosenMove.error||""):"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Text {width:content.width;text:root.chosenMove&&root.chosenMove.originalAvailable?"Your original is untouched and stays in use. Continue syncs changes and restarts full verification.":"Inspect both copies before acting. Nothing resumes automatically at boot.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Button {text:"Continue (full verify)";enabled:root.storage.helperAvailable&&!service.mutating;onClicked:root.action("resume_move");}
-                        Row {spacing:Style.spacing.sm;Button{text:"Start over…";enabled:root.chosenMove&&root.chosenMove.originalAvailable;onClicked:root.action("restart_move");}Button{text:"Cancel move…";enabled:root.chosenMove&&root.chosenMove.originalAvailable;onClicked:root.action("cancel_move");}}
-                        Button {text:"Undo move…";enabled:root.chosenMove&&root.chosenMove.oldCopyAvailable;onClicked:root.action("rollback_move");}
-                        Button {text:"Delete old copy…";enabled:root.chosenMove&&root.chosenMove.canDelete===true;foreground:Color.urgent;onClicked:root.action("delete_old_copy");}
-                        Text {width:content.width;text:"Deletion is separate and only available after saved cutover verification, an OS reboot and the correct live bind. Snapshots may retain old data.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        readonly property var words:root.chosenMove?Model.moveText(root.chosenMove,root.pendingRestart):["",""]
+                        Text {width:content.width;text:root.chosenMove?Model.display(root.chosenMove.source)+" → "+Model.display(root.chosenMove.destMount):"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:parent.words[0];color:root.chosenMove&&Model.warning({moves:[root.chosenMove],restartPending:root.pendingRestart})?Color.urgent:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;font.bold:true;textFormat:Text.PlainText}
+                        Text {width:content.width;text:parent.words[1];color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;visible:!!(root.chosenMove&&root.chosenMove.error);text:root.chosenMove?Model.display(root.chosenMove.error):"";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Repeater {
+                            model:root.chosenMove?Model.moveActions(root.chosenMove,root.pendingRestart):[]
+                            Button {
+                                required property var modelData
+                                text:root.actionLabels[modelData]||modelData
+                                enabled:root.storage.helperAvailable&&!service.mutating
+                                foreground:modelData==="delete_old_copy"?Color.urgent:root.ink
+                                onClicked:root.action(modelData)
+                            }
+                        }
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="progress"
                         Text {width:content.width;text:root.lastJob?root.lastJob.method+" · "+root.lastJob.state:"Waiting for the helper…";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Text {width:content.width;text:"You can close this panel; the helper owns the operation. Copy → Verify → Switch → Test → Keep old copy. Interrupted work stays paused until you explicitly Continue or Undo.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
-                        Repeater {model:root.moves.length;Button{required property int index;property var move:root.moves[index]||({});width:content.width;leftAlign:true;text:Model.display(move.source)+" · "+move.state;onClicked:root.selectMove(move);}}
+                        Text {width:content.width;text:"You can close this panel; the helper owns the operation. Folder moves themselves only run during a restart.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Repeater {model:root.moves.length;Button{required property int index;property var move:root.moves[index]||({});width:content.width;leftAlign:true;text:Model.display(move.source)+" · "+Model.moveText(move,root.pendingRestart)[0];onClicked:root.selectMove(move);}}
                         Repeater {model:(root.storage.drives||[]).length;Text{required property int index;width:content.width;text:Model.display(root.storage.drives[index].name)+" · "+root.storage.drives[index].state;color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;textFormat:Text.PlainText;}}
                     }
                     PanelSeparator {}
@@ -264,6 +279,7 @@ BarWidget {
         function selectMove(id:string):string{for(var i=0;i<root.moves.length;i++)if(root.moves[i].id===id){root.selectMove(root.moves[i]);return "ok";}return "missing";}
         function setMove(source:string,dest:string):void{sourceField.text=source;destinationField.text=dest;root.go("move");}
         function reviewMove():void{root.startMove();}
+        function moveAction(op:string):string{if(!root.chosenMove||Model.moveActions(root.chosenMove,root.pendingRestart).indexOf(op)<0)return "unavailable";root.action(op);return "ok";}
         function serial(fragment:string):string{serialField.text=fragment;return Model.canProvision(root.chosenDisk,fragment)?"matched":"rejected";}
     }
 }
