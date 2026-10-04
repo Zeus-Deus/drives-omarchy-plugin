@@ -1,0 +1,21 @@
+[Unit]
+Description=Drives folder move (maintenance boot)
+DefaultDependencies=no
+ConditionPathExists=/drives-maintenance-request.json
+ConditionPathExists=/run/drives-maintenance/boot.json
+# Ordered after the target but deliberately not Requisite: if the target fails
+# the worker still runs, its audit refuses, and the machine boots normally
+# instead of stalling at a blank maintenance screen.
+After=drives-maintenance.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/lib/drives-helper
+ExecStart=/usr/bin/python3 -B -m helper.offline
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=infinity
+NoNewPrivileges=yes

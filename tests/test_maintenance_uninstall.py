@@ -12,6 +12,7 @@ OWNED=[
     '/etc/systemd/system/drives-maintenance.target',
     '/etc/systemd/system/drives-maintenance-splash.service',
     '/etc/systemd/system/drives-maintenance-audit.service',
+    '/etc/systemd/system/drives-maintenance-worker.service',
     '/etc/systemd/system-generators/drives-maintenance-generator',
     '/usr/share/polkit-1/actions/io.github.zeus-deus.drives.policy',
     '/etc/dbus-1/system.d/io.github.zeus_deus.Drives.conf',
@@ -29,6 +30,11 @@ def harness(tmp_path):
     for name in OWNED:mapped[name].write_bytes(('owned:'+name).encode())
     script=(ROOT/'helper/uninstall.sh').read_text()
     for name in sorted(mapped,key=len,reverse=True):script=script.replace(name,str(mapped[name]))
+    # Every absolute path the script would remove must be remapped, or the
+    # test deletes real files from the guest it runs in.
+    import re
+    leaked=[p for p in re.findall(r'(?<![\w.-])/(?:etc|usr|run)/[\w./@-]+',script) if not p.startswith(str(tmp_path))]
+    assert not [p for p in leaked if not p.startswith(('/usr/bin','/run/drives-maintenance'))],leaked
     runner=tmp_path/'uninstall.sh';runner.write_text(script)
     spy=tmp_path/'systemctl'
     spy.write_text('#!/usr/bin/python3\nimport json,os,pathlib,sys\na=sys.argv[1:]\nwith open(os.environ["SPY_LOG"],"a") as f:f.write(json.dumps(a)+"\\n")\nif a[0]=="show":print(os.environ.get("TARGET_STATE","inactive"))\nif a[0]=="stop" and os.environ.get("LATE_LATCH"):pathlib.Path(os.environ["LATE_LATCH"]).write_text("late request")\n')

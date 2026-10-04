@@ -3,7 +3,8 @@ import contextlib,errno,fcntl,hashlib,os,pathlib,pwd,shutil,stat,struct,time,uui
 from helper.common import Failure,run,mount_rows,mount_for,escape_fstab,read_regular
 from topology import probe,blocks
 
-ACTIVE={'planned','copying','verifying','switching','testing','cleaning'}
+ACTIVE={'planned','quarantining','copying','verifying','switching','testing','rolling-back','cleaning'}
+WAITING={'awaiting-maintenance'}
 PROTECTED={'.hermes','.claude','.codex','.codemux','.opencode','.config','.ssh','.gnupg','.mozilla','.password-store','keyrings','chromium','google-chrome','firefox','postgres','postgresql','mysql','mariadb'}
 
 def durable_directory(path):
@@ -144,16 +145,70 @@ class MoveManager:
         stats=tree_stats(src,uid);v=os.statvfs(target)
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
         return stats,topology,uid
+    def offline_layout(self,src,topology):
+        """Facts the maintenance boot needs to mount both sides by itself."""
+        from helper.offline import crypttab_key
+        source_mount=probe(src,resolve=False)['mount']['target']
+        if source_mount!='/':
+            fstab=[line.split() for line in read_regular('/etc/fstab',65536).decode().splitlines()]
+            if not any(len(f)>=2 and not f[0].startswith('#') and f[1]==source_mount for f in fstab):raise Failure('source filesystem is not listed in /etc/fstab')
+        crypt=[n for n in topology['chain'] if n.get('type')=='crypt']
+        if len(crypt)!=1:raise Failure('destination must be one encrypted volume')
+        mapper=os.path.basename(crypt[0]['name'])
+        crypttab_key(mapper)
+        return source_mount,mapper
     def start(self,src,destMount):
         stats,topology,uid=self.preflight(src,destMount)
+        source_mount,mapper=self.offline_layout(src,topology)
         id=uuid.uuid4().hex;dest=destMount+'/drives-'+id;backup=src+'.pre-move'
         if os.path.lexists(backup):raise Failure('old-copy path already exists')
+        if any(r.get('source')==src and r['state'] not in ('cleaned','rolled-back') for r in self.c.records('moves')):raise Failure('this folder already has an unfinished move')
         j={'id':id,'state':'planned','source':src,'destMount':destMount,'dest':dest,'backup':backup,
            'sourceIdentity':identity(src),'sourceUUID':probe(src,resolve=False)['chain'][-1]['uuid'],'parentIdentity':identity(str(pathlib.Path(src).parent)),'destUUID':topology['chain'][-1]['uuid'],'mountIdentity':identity(destMount),'diskSerial':topology['disk'].get('serial'),
            'uid':uid,'stats':stats,'boot_id':self.c.boot_id(),'verified':False,'created':time.time(),
+           'maintenanceProtocol':2,'sourceMount':source_mount,'destMapper':mapper,
            'destFSRoot':os.path.normpath(topology['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(dest,destMount))}
         self.stage(j,'planned');os.mkdir(dest,0o700);durable_directory(dest);durable_directory(destMount);j['destIdentity']=identity(dest);self.c.journal('moves',id,j)
         return self.execute(j)
+    # --- maintenance requests (protocol 2) -------------------------------------
+    def latch(self,*args):
+        """Write /drives-maintenance-request.json from a fresh transient unit:
+        this helper's own namespace keeps / read-only."""
+        # The Btrfs root directory is mode 0555: even root needs DAC override.
+        try:
+            run(['systemd-run','--quiet','--wait','--collect','--pipe','--unit=drives-request-'+uuid.uuid4().hex,
+                '--property=WorkingDirectory=/usr/lib/drives-helper','--property=ProtectHome=yes',
+                '--property=PrivateTmp=yes','--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE',
+                '/usr/bin/python3','-B','-m','helper.latch',*args],timeout=60)
+        except Failure as error:
+            raise Failure('could not '+('schedule' if args[0]=='arm' else 'withdraw')+' the restart request ('+str(error)+')') from None
+    def waiting(self,j):
+        return j['state'] in WAITING or (j['state']=='paused' and j.get('interruptedState') in WAITING)
+    def request(self,id,action):
+        j=self.c.read('moves',id)
+        if j.get('maintenanceProtocol')!=2:raise Failure('this older move needs administrator inspection; both copies are kept')
+        if action=='continue':
+            from helper.offline import OFFLINE
+            if j['state'] in OFFLINE:pass # interrupted offline step: the worker restores the original first
+            elif not self.waiting(j):raise Failure('this move is not waiting to run')
+            else:
+                self.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
+                if os.path.lexists(j['backup']) or self.bound(j):raise Failure('unexpected old copy or bind; inspect before continuing')
+                self.destination(j)
+        elif j['state']=='rolling-back':pass # interrupted Undo: the worker finishes restoring
+        else:
+            if j['state']!='switched' or not j.get('verified') or not self.bound(j):raise Failure('only an active, verified move can be undone')
+            if open_users(j['source']):raise Failure('close apps using this folder first')
+        self.latch('arm',id,action)
+        j['error']='';j.pop('needsAttention',None);self.c.journal('moves',id,j)
+        return {'ok':True,'id':id,'state':'restart-required','action':action}
+    def cancel_request(self,id):
+        from helper.maintenance import latch_request
+        value=latch_request()
+        if value['moveId']!=id:raise Failure('the pending restart belongs to another move')
+        if value['armedBootId']!=self.c.boot_id():raise Failure('this request was not made in the current session; inspect as administrator')
+        self.latch('clear',id,value['armedBootId'])
+        return {'ok':True,'id':id,'state':'request-cancelled'}
     def destination(self,j):
         safe_path(j['destMount']);safe_path(j['dest']);self.changed(j['destMount'],j['mountIdentity'],j.get('destUUID'));self.changed(j['dest'],j['destIdentity'],j.get('destUUID'))
         t=probe(j['destMount'],resolve=False)
@@ -205,15 +260,16 @@ class MoveManager:
         # Protocol 1 copied a live source: never promote that path to a verified
         # cutover. Queue untouched sources for the new offline protocol instead.
         # No public caller can opt into protocol 2 through method arguments.
-        if j.get('maintenanceProtocol')!=2:
-            if os.path.lexists(j['backup']):raise Failure('legacy interrupted cutover requires maintenance inspection; both copies are retained')
-            j['verified']=False;j.pop('cutover',None);j.pop('interruptedState',None)
-            self.stage(j,'awaiting-maintenance')
-            return {'ok':True,'id':j['id'],'state':'awaiting-maintenance','message':'Save work; explicit maintenance cutover is required. The original remains in use.'}
-        raise Failure('offline protocol is not yet qualified; original and destination are retained')
+        # Protocol 2 (planned by start) does the same here: plan only. The copy
+        # runs in the maintenance boot (helper/offline.py) after a restart.
+        if os.path.lexists(j['backup']):raise Failure('legacy interrupted cutover requires maintenance inspection; both copies are retained')
+        j['verified']=False;j.pop('cutover',None);j.pop('interruptedState',None)
+        self.stage(j,'awaiting-maintenance')
+        return {'ok':True,'id':j['id'],'state':'awaiting-maintenance','message':'Planned. The move runs during a restart, while nothing else is using the folder.'}
 
     def resume(self,id):
         j=self.c.read('moves',id)
+        if j.get('maintenanceProtocol')==2:return self.request(id,'continue')
         if not j.get('destUUID'):
             if j['boot_id']!=self.c.boot_id():raise Failure('legacy move requires manual filesystem identity inspection')
             original=j['backup'] if os.path.lexists(j['backup']) else j['source']
@@ -236,7 +292,7 @@ class MoveManager:
     def rollback(self,id):
         j=self.c.read('moves',id)
         if j.get('maintenanceProtocol')!=2:raise Failure('legacy undo requires maintenance inspection; both copies are retained')
-        raise Failure('maintenance rollback is not yet qualified; both copies are retained')
+        return self.request(id,'rollback')
     def delete_old(self,id):
         j=self.c.read('moves',id)
         if not j.get('verified') or j.get('boot_id')==self.c.boot_id():raise Failure('cleanup requires saved verification and a successful reboot')
@@ -256,12 +312,17 @@ class MoveManager:
                 if (now.st_dev,now.st_ino)!=(held.st_dev,held.st_ino):raise Failure('old-copy name changed during cleanup')
                 os.rmdir(name,dir_fd=parent);os.fsync(parent)
         else:self.stage(j,'cleaning')
+        if j.get('quarantine'):
+            # The private store held only the original; remove it once empty.
+            with contextlib.suppress(FileNotFoundError):os.rmdir(j['quarantine']['path'])
         self.stage(j,'cleaned');return {'ok':True,'id':id,'state':'cleaned','spaceWarning':'Btrfs snapshots may retain this data; reclaimed space is not guaranteed.'}
     def discard_admission(self,j):
         before_switch={'planned','copying','verifying','awaiting-maintenance'}
         phase=j.get('interruptedState') if j['state']=='paused' else j['state']
-        if phase not in before_switch or j.get('verified') or j.get('cutover') or j.get('placeholderIdentity'):
+        if phase not in before_switch or j.get('verified') or j.get('cutover') or j.get('placeholderIdentity') or j.get('quarantine'):
             raise Failure('cannot discard a destination after a possible switch; inspect both copies')
+        from helper.maintenance import LATCH,latch_request
+        if os.path.lexists(LATCH) and latch_request()['moveId']==j['id']:raise Failure('cancel the pending restart first')
         if os.path.lexists(j['backup']) or self.bound(j):raise Failure('active bind or old copy blocks discard')
         self.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
         self.destination(j)

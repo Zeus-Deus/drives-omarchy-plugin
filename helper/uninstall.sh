@@ -19,7 +19,7 @@ systemctl stop drives-helper.service
 assert_uninstall_safe
 systemctl disable drives-helper.service
 rm -f /etc/systemd/system/drives-helper.service /usr/share/polkit-1/actions/io.github.zeus-deus.drives.policy /etc/dbus-1/system.d/io.github.zeus_deus.Drives.conf
-rm -f /etc/systemd/system/drives-maintenance.target /etc/systemd/system/drives-maintenance-splash.service /etc/systemd/system/drives-maintenance-audit.service /etc/systemd/system-generators/drives-maintenance-generator
+rm -f /etc/systemd/system/drives-maintenance.target /etc/systemd/system/drives-maintenance-splash.service /etc/systemd/system/drives-maintenance-audit.service /etc/systemd/system/drives-maintenance-worker.service /etc/systemd/system-generators/drives-maintenance-generator
 # Remove the dependency without stopping its required unit: stopping the guard
 # while sysinit requires it can tear down the running normal desktop.
 rm -f /etc/systemd/system/sysinit.target.d/drives-normal-boot-guard.conf /etc/systemd/system/drives-normal-boot-guard.service /usr/lib/drives-helper/normal_boot_guard.py

@@ -74,6 +74,31 @@ def latch_request():
     return value
 
 
+def write_latch(move_id,action,current_boot=None):
+    """Arm one explicit request for the NEXT boot. Root only; the ordinary
+    helper holds the storage lease and has already validated the journal."""
+    if os.geteuid()!=0:raise Failure('maintenance requests require root')
+    if action not in ('continue','rollback'):raise Failure('invalid maintenance action')
+    if not isinstance(move_id,str) or not re.fullmatch('[a-f0-9]{32}',move_id):raise Failure('invalid maintenance move id')
+    if os.path.lexists(LATCH):raise Failure('another folder move is already waiting for a restart')
+    value={'version':1,'moveId':move_id,'action':action,'armedBootId':current_boot or boot_id()}
+    atomic(LATCH,json.dumps(value,ensure_ascii=True).encode(),0o600)
+    return value
+
+
+def clear_latch(move_id,armed_boot=None):
+    """Release only the exact request that was armed; never a different one."""
+    if os.geteuid()!=0:raise Failure('maintenance requests require root')
+    value=latch_request()
+    if value['moveId']!=move_id:raise Failure('maintenance request belongs to another move')
+    if armed_boot is not None and value['armedBootId']!=armed_boot:raise Failure('maintenance request was armed in another boot')
+    os.unlink(LATCH)
+    fd=os.open(str(LATCH.parent),os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+    return value
+
+
 def request(state_dir=STATE):
     state=private_directory(state_dir)
     value=latch_request()
@@ -97,11 +122,12 @@ def activation_guards(early,runtime):
     conditions. This is prevention infrastructure, not migration admission:
     udev/direct process writers and boot/runtime provenance still need auditing.
     """
-    from helper.maintenance_audit import CORE_SERVICES,CORE_SOCKETS,AUDIT_UNIT
+    from helper.maintenance_audit import CORE_SERVICES,CORE_SOCKETS,AUDIT_UNIT,WORKER_UNIT,SHUTDOWN_SERVICES
     for kind in ACTIVATION_TYPES:
         directory=private_directory(early/(kind+'.d'),create=True)
         atomic(directory/ACTIVATION_DROPIN,('[Unit]\nConditionPathExists=!'+str(runtime)+'\n').encode(),0o644)
-    for unit in CORE_SERVICES|CORE_SOCKETS|{AUDIT_UNIT}:
+    # Shutdown services only end the boot; without them reboot.target would hang.
+    for unit in CORE_SERVICES|CORE_SOCKETS|SHUTDOWN_SERVICES|{AUDIT_UNIT,WORKER_UNIT}:
         directory=private_directory(early/(unit+'.d'),create=True)
         atomic(directory/ACTIVATION_DROPIN,b'[Unit]\n# Exempt only the owned type-wide activation condition.\n',0o644)
 

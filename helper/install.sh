@@ -16,7 +16,7 @@ install -d -m 0755 /usr/lib/drives-helper/helper
 install -m 0644 "$source_dir"/helper/*.py /usr/lib/drives-helper/helper/
 install -m 0644 "$source_dir/topology.py" /usr/lib/drives-helper/
 install -m 0644 "$source_dir"/packaging/drives-helper.service /etc/systemd/system/
-install -m 0644 "$source_dir"/packaging/drives-maintenance.target "$source_dir"/packaging/drives-maintenance-splash.service "$source_dir"/packaging/drives-maintenance-audit.service /etc/systemd/system/
+install -m 0644 "$source_dir"/packaging/drives-maintenance.target "$source_dir"/packaging/drives-maintenance-splash.service "$source_dir"/packaging/drives-maintenance-audit.service "$source_dir"/packaging/drives-maintenance-worker.service /etc/systemd/system/
 install -m 0644 "$source_dir"/packaging/drives-normal-boot-guard.service /etc/systemd/system/
 install -m 0644 "$source_dir"/helper/normal_boot_guard.py /usr/lib/drives-helper/normal_boot_guard.py
 install -m 0644 "$source_dir"/packaging/drives-sysinit-guard.conf /etc/systemd/system/sysinit.target.d/drives-normal-boot-guard.conf

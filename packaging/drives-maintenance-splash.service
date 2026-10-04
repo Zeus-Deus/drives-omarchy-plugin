@@ -3,7 +3,7 @@ Description=End initramfs boot screen before Drives maintenance inspection
 DefaultDependencies=no
 ConditionPathExists=/drives-maintenance-request.json
 ConditionPathExists=/run/drives-maintenance/boot.json
-ConditionPathIsExecutable=/usr/bin/plymouth
+ConditionFileIsExecutable=/usr/bin/plymouth
 Requires=systemd-remount-fs.service
 After=systemd-remount-fs.service
 Before=drives-maintenance.target
@@ -11,8 +11,10 @@ Before=drives-maintenance.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/plymouth quit
-ExecStart=/usr/bin/plymouth --wait
+# A boot screen that already exited (or never started) is not a failure; the
+# audit separately refuses any residual plymouthd process.
+ExecStart=-/usr/bin/plymouth quit
+ExecStart=-/usr/bin/plymouth --wait
 TimeoutStartSec=20
 User=root
 NoNewPrivileges=yes

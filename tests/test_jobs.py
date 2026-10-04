@@ -1,5 +1,13 @@
-import pathlib,sys
+import pathlib,sys,pytest
 ROOT=pathlib.Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+
+@pytest.fixture(autouse=True)
+def private_maintenance_controls(tmp_path,monkeypatch):
+    # Scheduler tests must not depend on whether the test guest itself has a
+    # real restart request armed at /drives-maintenance-request.json.
+    from helper import maintenance
+    monkeypatch.setattr(maintenance,'LATCH',tmp_path/'no-latch')
+    monkeypatch.setattr(maintenance,'RUNTIME',tmp_path/'no-runtime')
 
 def test_scheduler_refuses_a_shared_lease_before_writing_jobs(tmp_path,monkeypatch):
     import pytest

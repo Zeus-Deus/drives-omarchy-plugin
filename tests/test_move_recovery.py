@@ -38,6 +38,7 @@ def test_destination_creation_is_durable_before_execution(tmp_path,monkeypatch):
     monkeypatch.setattr(moves.os,'fsync',sync)
     monkeypatch.setattr(m,'preflight',lambda *args:({}, {'chain':[{'uuid':'DST'}],'disk':{'serial':'TESTDATA0001'},'mount':{'fsroot':'/'}},1000))
     monkeypatch.setattr(moves,'probe',lambda *args,**kwargs:{'chain':[{'uuid':'SRC'}]})
+    monkeypatch.setattr(m,'offline_layout',lambda *args:('/','data'))
     def execute(j):
         assert j['dest'] in seen and str(disk) in seen
         return j

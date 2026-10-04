@@ -24,8 +24,8 @@ def test_maintenance_ends_boot_splash_without_normal_boot_dependencies():
     text=unit.read_text()
     assert 'DefaultDependencies=no' in text
     assert 'Type=oneshot' in text and 'RemainAfterExit=yes' in text
-    assert 'ExecStart=/usr/bin/plymouth quit' in text
-    assert 'ExecStart=/usr/bin/plymouth --wait' in text
+    assert 'ExecStart=-/usr/bin/plymouth quit' in text
+    assert 'ExecStart=-/usr/bin/plymouth --wait' in text
     assert 'TimeoutStartSec=20' in text
     assert '[Install]' not in text
     target=(ROOT/'packaging/drives-maintenance.target').read_text()

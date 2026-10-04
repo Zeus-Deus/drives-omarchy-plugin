@@ -10,7 +10,7 @@ def handle(req):
         result=snapshot();result.update(ok=True,helperAvailable=False,moves=[],drives=[],jobs=[])
         try:
             from helper.client import status
-            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','testFixtureMode')});result['helperAvailable']=h.get('ok',False)
+            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','testFixtureMode','restartPending')});result['helperAvailable']=h.get('ok',False)
         except Exception:result['helperError']='Storage helper is not installed or unavailable. The overview remains read-only.'
         result['agentAvailable']=pathlib.Path(__file__).with_name('helper').joinpath('agent.py').exists()
         # Do not expose unrelated pseudo-filesystems to QML.
@@ -19,7 +19,7 @@ def handle(req):
     if op=='probe':return {'ok':True,**probe(req.get('path',''))}
     methods={'start_move':('StartMove',('src','destMount')),'resume_drive':('ResumeDrive',('id',)),'resume_move':('ResumeMove',('id',)),
         'rollback_move':('RollbackMove',('id',)),'delete_old_copy':('DeleteOldCopy',('id',)),
-        'cancel_move':('CancelMove',('id',)),'restart_move':('RestartMove',('id',)),
+        'cancel_move':('CancelMove',('id',)),'restart_move':('RestartMove',('id',)),'cancel_restart':('CancelRestart',('id',)),
         'export_header':('ExportHeaderBackup',('name','destination'))}
     if op not in methods:raise Failure('unknown operation')
     method,keys=methods[op]

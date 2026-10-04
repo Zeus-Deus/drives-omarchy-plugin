@@ -4,8 +4,17 @@ from helper.common import Common,Failure
 from helper.moves import MoveManager,ACTIVE
 
 BUS='io.github.zeus_deus.Drives';OBJECT='/io/github/zeus_deus/Drives'
-ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export'}
-SIGNATURES={'ProvisionDrive':'sh','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','Status':''}
+ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume'}
+SIGNATURES={'ProvisionDrive':'sh','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
+
+def pending_restart():
+    """The armed maintenance request, as plain facts for the panel."""
+    from helper.maintenance import LATCH,latch_request
+    if not os.path.lexists(LATCH):return None
+    try:value=latch_request()
+    except Exception:return {'valid':False}
+    from helper.common import boot_id
+    return {'valid':True,'moveId':value['moveId'],'action':value['action'],'thisSession':value['armedBootId']==boot_id()}
 XML='<node><interface name="'+BUS+'">'+''.join('<method name="'+m+'">'+''.join('<arg type="'+s+'" direction="in"/>' for s in signature)+'<arg type="s" direction="out"/></method>' for m,signature in SIGNATURES.items())+'</interface></node>'
 
 def read_secret_fd(fd):
@@ -42,7 +51,7 @@ class Server:
             for m in moves:
                 if m.get('updated',0)>=running['started'] and m.get('interruptedState') in ACTIVE:
                     m['state']=m['interruptedState'];m['error']=''
-        return {'ok':True,'version':'0.1.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
+        return {'ok':True,'version':'0.2.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
@@ -55,7 +64,9 @@ class Server:
         try:
             lease=self.c.storage_lock();lease.__enter__();leased=True
             from helper.maintenance import LATCH,RUNTIME
-            if os.path.lexists(LATCH) or os.path.lexists(RUNTIME):
+            # Withdrawing this session's own request is the one write allowed
+            # while it is armed; MoveManager.cancel_request re-checks it exactly.
+            if os.path.lexists(RUNTIME) or (os.path.lexists(LATCH) and method!='CancelRestart'):
                 raise Failure('maintenance controls require inspection before normal storage operations')
             self.c.journal('jobs',job['id'],job)
             self.jobs=(self.jobs+[job])[-24:]
@@ -81,7 +92,7 @@ class Server:
                     from helper.provisioning import export_header
                     result=export_header(*args,self.c,uid)
                 else:
-                    name={'ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete_old','CancelMove':'cancel','RestartMove':'restart'}[method]
+                    name={'ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete_old','CancelMove':'cancel','RestartMove':'restart','CancelRestart':'cancel_request'}[method]
                     result=getattr(manager,name)(args[0])
                 job['state']='done';job['result']=result
                 if method in ('ProvisionDrive','ResumeDrive'):self.draining=True
