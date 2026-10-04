@@ -66,6 +66,13 @@ var MOVE_TEXT={
     "cleaned":["Moved · old copy deleted","Snapshots may still hold the old data for a while."]
 };
 function moveText(move,pending){return MOVE_TEXT[moveStage(move,pending)];}
+// Undone moves are history. Of several moves of one folder, show only the
+// newest; the folder can only be in one place.
+function visibleMoves(moves) {
+    var latest={};
+    for(var i=0;i<moves.length;i++){var m=moves[i];if(!latest[m.source]||(m.created||0)>(latest[m.source].created||0))latest[m.source]=m;}
+    return moves.filter(function(m){return latest[m.source]===m && m.state!=="rolled-back";});
+}
 function moveActions(move,pending) {
     var stage=moveStage(move,pending), other=pending && pending.moveId && pending.moveId!==move.id;
     var a={"move-on-restart":["restart","cancel_restart"],"undo-on-restart":["restart","cancel_restart"],

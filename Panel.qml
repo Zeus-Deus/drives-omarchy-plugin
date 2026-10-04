@@ -18,7 +18,7 @@ BarWidget {
     readonly property bool popoutSwitchClosing: controller.popoutSwitchClosing
     readonly property var storage: service.snapshot
     readonly property var disks: storage.disks || []
-    readonly property var moves: storage.moves || []
+    readonly property var moves: Model.visibleMoves(storage.moves || [])
     readonly property var configuredDrives: storage.drives || []
     readonly property var chosenDisk: {
         for (var i=0;i<disks.length;i++) if(disks[i].id===selectedDiskId)return disks[i];
