@@ -18,6 +18,8 @@ def test_each_mutator_has_separate_auth_admin_policy():
     import xml.etree.ElementTree as ET
     policy=ET.parse(ROOT/'packaging/io.github.zeus-deus.drives.policy')
     actions=policy.findall('action')
-    assert len(actions)==9
+    from helper.service import ACTIONS
+    ids=[a.attrib['id'] for a in actions]
+    assert len(ids)==len(set(ids))
+    assert set(ids)=={'io.github.zeus-deus.drives.'+name for name in ACTIONS.values()}, 'every helper write needs its own declared polkit action'
     assert all(a.find('defaults/allow_active').text=='auth_admin' for a in actions)
-    assert len({a.attrib['id'] for a in actions})==9
