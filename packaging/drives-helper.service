@@ -13,7 +13,11 @@ UMask=0077
 StateDirectory=drives-helper
 StateDirectoryMode=0700
 ProtectSystem=strict
-ReadWritePaths=/var/lib/drives-helper /etc/fstab /etc/crypttab /etc/cryptsetup-keys.d /home /mnt/drives -/data -/data2 -/data3 -/data4
+# Drives (/data, /dataN, /mnt/drives/*) are deliberately absent: a locked
+# drive's automount here would stop the helper from starting, and a mounted one
+# would be pinned read-only in this namespace. Writes to a drive go through
+# fixed transient workers (helper/destination.py, helper/mountproof.py).
+ReadWritePaths=/var/lib/drives-helper /etc/fstab /etc/crypttab /etc/cryptsetup-keys.d /home
 ProtectHome=no
 PrivateTmp=yes
 PrivateDevices=no

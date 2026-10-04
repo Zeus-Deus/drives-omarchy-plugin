@@ -80,7 +80,7 @@ class Server:
         def work():
             worker_started.set()
             try:
-                manager=MoveManager(self.c,uid=None if uid==0 else uid)
+                manager=MoveManager(self.c,uid=None if uid==0 else uid,isolated=True)
                 if method=='ProvisionDrive':
                     from helper.provisioning import provision
                     result=provision(args[0],secret,self.c)

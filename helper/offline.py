@@ -63,7 +63,9 @@ def crypttab_key(mapper):
         fields=line.split()
         if not fields or fields[0].startswith('#') or fields[0]!=mapper:continue
         if len(fields)<3 or not fields[2].startswith('/'):break
-        key=pathlib.Path(fields[2]);info=os.stat(key,follow_symlinks=False)
+        key=pathlib.Path(fields[2])
+        try:info=os.stat(key,follow_symlinks=False)
+        except FileNotFoundError:raise Failure("this drive's unlock key is missing on this computer, so it cannot be used for a move during restart") from None
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077:raise Failure('destination keyfile is unsafe')
         return {'mapper':mapper,'device':fields[1],'key':str(key)}
     raise Failure('destination drive must unlock with the OS (keyfile in crypttab)')

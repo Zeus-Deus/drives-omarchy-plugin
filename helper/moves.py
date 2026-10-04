@@ -1,5 +1,5 @@
 """Fail-closed folder copy/verify/bind with inspect-only crash recovery."""
-import contextlib,errno,fcntl,hashlib,os,pathlib,pwd,shutil,stat,struct,time,uuid
+import contextlib,errno,fcntl,hashlib,json,os,pathlib,pwd,shutil,stat,struct,time,uuid
 from helper.common import Failure,run,mount_rows,mount_for,escape_fstab,read_regular
 from topology import probe,blocks
 
@@ -115,7 +115,23 @@ def tree_stats(path,uid=None):
     return {'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
 
 class MoveManager:
-    def __init__(self,common,uid=None):self.c=common;self.uid=uid
+    def __init__(self,common,uid=None,isolated=False):
+        # isolated: running inside drives-helper.service, whose namespace keeps
+        # drives read-only; destination writes then go through helper.destination.
+        self.c=common;self.uid=uid;self.isolated=isolated
+    def destination_op(self,j,*args):
+        from helper import destination
+        if not self.isolated:return destination.main(list(args))
+        safe_path(j['destMount'])
+        out=run(['systemd-run','--quiet','--wait','--collect','--pipe','--unit=drives-destination-'+uuid.uuid4().hex,
+            '--property=WorkingDirectory=/usr/lib/drives-helper','--property=ProtectSystem=strict',
+            '--property=ReadWritePaths='+j['destMount'],'--property=ProtectHome=yes','--property=PrivateTmp=yes',
+            '--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH',
+            '/usr/bin/python3','-B','-m','helper.destination',*args],timeout=3600)
+        return json.loads(out)
+    def make_destination(self,j):
+        j['destIdentity']=self.destination_op(j,'create',j['dest'])['identity']
+        self.c.journal('moves',j['id'],j)
     def stage(self,j,state):
         j['state']=state;j['updated']=time.time()
         if state!='paused':j['error']=''
@@ -168,7 +184,7 @@ class MoveManager:
            'uid':uid,'stats':stats,'boot_id':self.c.boot_id(),'verified':False,'created':time.time(),
            'maintenanceProtocol':2,'sourceMount':source_mount,'destMapper':mapper,
            'destFSRoot':os.path.normpath(topology['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(dest,destMount))}
-        self.stage(j,'planned');os.mkdir(dest,0o700);durable_directory(dest);durable_directory(destMount);j['destIdentity']=identity(dest);self.c.journal('moves',id,j)
+        self.stage(j,'planned');self.make_destination(j)
         return self.execute(j)
     # --- maintenance requests (protocol 2) -------------------------------------
     def latch(self,*args):
@@ -284,7 +300,7 @@ class MoveManager:
             self.changed(j['destMount'],j['mountIdentity'],j.get('destUUID'))
             if topology['disk'].get('serial')!=j['diskSerial'] or j['dest']!=j['destMount']+'/drives-'+id:raise Failure('planned destination identity changed')
             if os.path.lexists(j['dest']):raise Failure('unrecorded destination exists; inspect before continuing')
-            os.mkdir(j['dest'],0o700);durable_directory(j['dest']);durable_directory(j['destMount']);j['destIdentity']=identity(j['dest']);self.c.journal('moves',id,j)
+            self.make_destination(j)
         if j['state']=='cleaning':return self.delete_old(id)
         if j['state']=='switched' and self.bound(j):
             self.stage(j,'switched');return {'ok':True,'id':id,'state':'switched'}
@@ -328,23 +344,15 @@ class MoveManager:
         self.destination(j)
     def discard_destination(self,id,restart=False):
         j=self.c.read('moves',id)
-        with anchored_tree(j['dest']) as (parent,leaf,name):
-            self.discard_admission(j)
-            held=identity_fd(leaf)
-            if held[1:]!=j['destIdentity'][1:] or held!=identity(j['dest']):raise Failure('destination changed during discard admission')
-            if identity_fd(parent)!=identity(str(pathlib.Path(j['dest']).parent)):raise Failure('destination ancestor changed during discard admission')
-            if any(r['target']==j['dest'] or r['target'].startswith(j['dest']+'/') for r in mount_rows()):raise Failure('mounted destination blocks discard')
-            delete_tree_fd(leaf)
-            now=os.stat(name,dir_fd=parent,follow_symlinks=False)
-            if (now.st_dev,now.st_ino)!=(held[0],held[1]):raise Failure('destination entry changed during discard')
-            os.rmdir(name,dir_fd=parent);os.fsync(parent)
-            if restart:
-                os.mkdir(name,0o700,dir_fd=parent)
-                newfd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
-                try:j['destIdentity']=identity_fd(newfd);os.fsync(newfd)
-                finally:os.close(newfd)
-                os.fsync(parent);j['verified']=False
-                return self.execute(j)
+        self.discard_admission(j)
+        if any(r['target']==j['dest'] or r['target'].startswith(j['dest']+'/') for r in mount_rows()):raise Failure('mounted destination blocks discard')
+        # The worker re-anchors the path itself and deletes only the recorded
+        # directory; a swapped ancestor or replaced folder is refused there.
+        args=['discard',j['dest'],json.dumps(j['destIdentity'])]+(['--recreate'] if restart else [])
+        result=self.destination_op(j,*args)
+        if restart:
+            j['destIdentity']=result['identity'];j['verified']=False;self.c.journal('moves',id,j)
+            return self.execute(j)
         self.stage(j,'rolled-back');return {'ok':True,'id':id,'state':'rolled-back'}
     def cancel(self,id):return self.discard_destination(id)
     def restart(self,id):return self.discard_destination(id,restart=True)

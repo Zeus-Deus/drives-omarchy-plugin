@@ -140,3 +140,12 @@ def test_worker_is_the_only_extra_unit_admitted():
     assert audit.validate_snapshot(snap,'a'*32,'continue',caller=audit.WORKER_UNIT)['ok']
     snap['targetWants']=[audit.WORKER_UNIT,'sshd.service']
     with pytest.raises(Failure):audit.validate_snapshot(snap,'a'*32,'continue',caller=audit.WORKER_UNIT)
+
+
+def test_missing_keyfile_is_a_plain_refusal(tmp_path,monkeypatch):
+    from helper import offline
+    from helper.common import Failure
+    tab=tmp_path/'crypttab';tab.write_text('data UUID=x '+str(tmp_path/'gone.key')+' luks,nofail\n')
+    real=offline.read_regular
+    monkeypatch.setattr(offline,'read_regular',lambda p,cap=0:real(str(tab),cap) if p=='/etc/crypttab' else real(p,cap))
+    with pytest.raises(Failure,match='unlock key is missing'):offline.crypttab_key('data')

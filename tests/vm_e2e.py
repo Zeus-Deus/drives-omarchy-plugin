@@ -8,6 +8,7 @@ It refuses to run outside a KVM guest and only touches TEST* serial disks.
   plan <src> <destMount>                   StartMove (normal session: plan only)
   request <moveId> continue|rollback       Resume/RollbackMove: arm the next-boot request
   cancel-request <moveId>                  CancelRestart
+  cancel <moveId>                          CancelMove (discard the planned destination)
   delete <moveId>                          DeleteOldCopy
   status                                   helper Status
   crash-at <stage>                         arm one QA power-cut injection for the next maintenance boot
@@ -65,6 +66,7 @@ def main(argv):
     elif op=='plan':result=submit('StartMove',(argv[1],argv[2]))
     elif op=='request':result=submit('ResumeMove' if argv[2]=='continue' else 'RollbackMove',(argv[1],))
     elif op=='cancel-request':result=submit('CancelRestart',(argv[1],))
+    elif op=='cancel':result=submit('CancelMove',(argv[1],))
     elif op=='delete':result=submit('DeleteOldCopy',(argv[1],))
     elif op=='status':result=status()
     elif op=='crash-at':
