@@ -23,12 +23,14 @@ def main():
         title=Gtk.Label(label='Encryption & recovery' if a.op=='provision' else 'Unlock encrypted drive',xalign=0);title.add_css_class('title-2');box.append(title)
         detail=Gtk.Label(label=('Serial '+clean(a.serial)+' · '+clean(a.mountpoint)) if a.op=='provision' else clean(a.device),xalign=0,wrap=True);box.append(detail)
         note=Gtk.Label(label='The recovery secret stays in this separate agent. It is never sent to the desktop panel.',xalign=0,wrap=True);note.add_css_class('dim-label');box.append(note)
-        secret=Gtk.PasswordEntry(show_peek_icon=True,hexpand=True);secret.set_placeholder_text('Recovery passphrase');box.append(secret)
+        secret=Gtk.PasswordEntry(show_peek_icon=True,hexpand=True,placeholder_text='Recovery passphrase');box.append(secret)
         stored=Gtk.CheckButton(label='I have stored the recovery passphrase safely')
+        inputs=[secret]
         if a.op=='provision':
             secret.set_text(secrets.token_urlsafe(32));box.append(stored)
             buttons=Gtk.Box(spacing=10);box.append(buttons)
             copy=Gtk.Button(label='Copy');regen=Gtk.Button(label='Regenerate');buttons.append(copy);buttons.append(regen)
+            inputs.extend((stored,copy,regen))
             def copy_value(_):
                 clipboard=Gdk.Display.get_default().get_clipboard()
                 value=GObject.Value();value.init(str);value.set_string(secret.get_text())
@@ -39,19 +41,30 @@ def main():
                     copy.set_label('Copy');return False
                 GLib.timeout_add_seconds(20,clear_owned)
             copy.connect('clicked',copy_value);regen.connect('clicked',lambda _:secret.set_text(secrets.token_urlsafe(32)))
+        secret.connect('changed',lambda _:stored.set_active(False))
+
         message=Gtk.Label(label='',xalign=0,wrap=True);box.append(message)
         actions=Gtk.Box(spacing=10,halign=Gtk.Align.END);cancel=Gtk.Button(label='Cancel');submit=Gtk.Button(label='Encrypt & set up' if a.op=='provision' else 'Unlock');submit.add_css_class('suggested-action');actions.append(cancel);actions.append(submit);box.append(actions)
         cancel.connect('clicked',lambda _:win.close());cancel.grab_focus()
+        busy=False;accepted=False
+        win.connect('close-request',lambda _:busy)
         def done(result):
-            submit.set_sensitive(True);cancel.set_sensitive(True)
-            if result.get('ok'):
+            nonlocal busy,accepted
+            busy=False;accepted=bool(result.get('ok'))
+            submit.set_sensitive(not accepted);cancel.set_sensitive(True)
+            for widget in inputs:widget.set_sensitive(not accepted)
+            if accepted:
                 message.set_text('Operation accepted. Return to Drives to follow progress.' if a.op=='provision' else 'Drive unlocked. Return to Drives and rescan.')
                 secret.set_text('');submit.set_sensitive(False);cancel.set_label('Close')
             else:message.set_text(clean(result.get('error','Operation failed')))
         def execute(_):
+            nonlocal busy
+            if busy or accepted:return
             if a.op=='provision' and not stored.get_active():message.set_text('Store the recovery passphrase before continuing.');return
             value=secret.get_text().encode()
             if not 8<=len(value)<=4096:message.set_text('Use a recovery passphrase of 8–4096 bytes.');return
+            busy=True
+            for widget in inputs:widget.set_sensitive(False)
             submit.set_sensitive(False);cancel.set_sensitive(False);message.set_text('Waiting for authorization…')
             def work():
                 try:
@@ -66,7 +79,8 @@ def main():
                         result={'ok':True}
                 except BaseException:result={'ok':False,'error':'Authorization or storage operation failed. No secret was logged.'}
                 GLib.idle_add(done,result)
-            threading.Thread(target=work,daemon=True).start()
+            try:threading.Thread(target=work,daemon=True).start()
+            except Exception:done({'ok':False,'error':'Could not start the storage request. Please try again.'})
         submit.connect('clicked',execute)
         win.present()
     app.connect('activate',activate)

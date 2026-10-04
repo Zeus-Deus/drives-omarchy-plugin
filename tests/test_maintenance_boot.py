@@ -35,6 +35,40 @@ def test_pending_request_selects_quiet_target_only_on_new_boot(tmp_path,monkeypa
     assert c.read('moves',move_id)['state']=='awaiting-maintenance'
 
 
+def test_maintenance_generates_type_wide_activation_guards(tmp_path,monkeypatch):
+    gate=implementation();c=Common(tmp_path/'state');move_id='e'*32
+    c.journal('moves',move_id,{'id':move_id,'state':'awaiting-maintenance'})
+    latch=tmp_path/'latch.json';latch.write_text(json.dumps({'version':1,'moveId':move_id,'action':'continue','armedBootId':'11111111-1111-1111-1111-111111111111'}));latch.chmod(0o600)
+    monkeypatch.setattr(gate,'LATCH',latch)
+    early=tmp_path/'early';early.mkdir(mode=0o700);runtime=tmp_path/'run'
+    assert gate.generate(early,c.state_dir,runtime,'22222222-2222-2222-2222-222222222222')
+    name='zzzz-drives-maintenance.conf'
+    for kind in ('service','socket','timer','path','mount','automount','swap','scope'):
+        guard=early/(kind+'.d')/name
+        assert guard.is_file(),kind+' activation has no maintained boot guard'
+        assert 'ConditionPathExists=!'+str(runtime) in guard.read_text()
+    # Shadow only the owned type-wide condition, without resetting vendor conditions.
+    exception=early/'systemd-journald.service.d'/name
+    assert exception.is_file() and 'ConditionPathExists=' not in exception.read_text()
+    assert not (early/'sshd.service.d'/name).exists()
+
+
+def test_reloading_after_latch_release_retains_this_boot_activation_guards(tmp_path,monkeypatch):
+    gate=implementation();c=Common(tmp_path/'state');move_id='f'*32
+    c.journal('moves',move_id,{'id':move_id,'state':'awaiting-maintenance'})
+    latch=tmp_path/'latch.json';latch.write_text(json.dumps({'version':1,'moveId':move_id,'action':'continue','armedBootId':'11111111-1111-1111-1111-111111111111'}));latch.chmod(0o600)
+    monkeypatch.setattr(gate,'LATCH',latch)
+    first=tmp_path/'first';first.mkdir(mode=0o700);runtime=tmp_path/'run'
+    boot='22222222-2222-2222-2222-222222222222'
+    assert gate.generate(first,c.state_dir,runtime,boot)
+    receipt=(runtime/'boot.json').read_bytes();latch.unlink()
+    reloaded=tmp_path/'reloaded';reloaded.mkdir(mode=0o700)
+    assert gate.generate(reloaded,c.state_dir,runtime,boot),'release incorrectly permits a live ordinary boot on reload'
+    assert (runtime/'boot.json').read_bytes()==receipt,'reload must retain the selected boot receipt'
+    assert (reloaded/'service.d'/'zzzz-drives-maintenance.conf').is_file()
+    assert os.readlink(reloaded/'default.target')==gate.TARGET
+
+
 def test_unavailable_var_cannot_hide_root_boot_latch(tmp_path,monkeypatch):
     gate=implementation()
     latch=tmp_path/'maintenance-root-latch.json'

@@ -1,5 +1,5 @@
 """Bounded subprocesses and durable root-owned storage journals."""
-import contextlib, json, os, pathlib, re, selectors, signal, stat, subprocess, time, uuid
+import contextlib, fcntl, json, os, pathlib, re, selectors, signal, stat, subprocess, time, uuid
 
 class Failure(RuntimeError):
     pass
@@ -110,6 +110,20 @@ class Common:
         paths=sorted((self.state_dir/kind).glob('*.json'))
         if len(paths)>256:raise Failure('journal count limit exceeded')
         return [self.read(kind,p.stem) for p in paths]
+    @contextlib.contextmanager
+    def storage_lock(self):
+        """A root-private, process-lifetime lease shared by all storage writers."""
+        from helper.maintenance import private_directory
+        directory=private_directory(self.state_dir)
+        fd=os.open(directory/'storage.lock',os.O_RDWR|os.O_CREAT|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077 or info.st_nlink!=1:
+                raise Failure('unsafe storage transaction lock')
+            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise Failure('another storage operation is already running') from None
+            yield
+        finally:os.close(fd)
     def config(self,path,id,line=None):
         path=pathlib.Path(path)
         if str(path) not in ('/etc/fstab','/etc/crypttab'):raise Failure('invalid configuration file')

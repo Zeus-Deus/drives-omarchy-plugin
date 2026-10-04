@@ -20,9 +20,25 @@ function boundedArgv(argv) {
     var script = 'o=$1; shift; set -o pipefail; "$@" 2>/dev/null | { head -c "$o"; [ "$(head -c 1 | wc -c)" -eq 0 ] || exit 90; }';
     return ["/usr/bin/bash","-c",script,"drives-bound","2097152"].concat(argv);
 }
+function configuredDriveState(drive,disks) {
+    if(drive.state!=="ready")return "Unfinished setup";
+    if(!drive.byId || !drive.serial || !drive.mountpoint)return "Inspect identity";
+    var matches=disks.filter(function(d){return d.byId===drive.byId && d.serial===drive.serial;});
+    if(matches.length===0)return "Missing drive";
+    if(matches.length!==1)return "Inspect identity";
+    var disk=matches[0];
+    if(disk.system || disk.state==="unsupported" || disk.encrypted!==true)return "Inspect identity";
+    if(disk.state==="locked")return "Locked";
+    var mounts=disk.mounts||[];
+    for(var i=0;i<mounts.length;i++)if(mounts[i].target===drive.mountpoint && mounts[i].fstype==="btrfs") {
+        var options=String(mounts[i].options||"").split(",");
+        return options.indexOf("rw")>=0 && options.indexOf("ro")<0 ? "Mounted" : "Read-only";
+    }
+    return "Not mounted";
+}
 function warning(snapshot) {
     var ds=snapshot.drives||[],ms=snapshot.moves||[];
-    for(var i=0;i<ds.length;i++)if(ds[i].state!=="ready")return true;
+    for(var i=0;i<ds.length;i++)if(configuredDriveState(ds[i],snapshot.disks||[])!=="Mounted")return true;
     for(var j=0;j<ms.length;j++)if(ms[j].state==="paused"||(!ms[j].bound&&ms[j].oldCopyAvailable))return true;
     return fullest(snapshot.disks||[])>=90;
 }

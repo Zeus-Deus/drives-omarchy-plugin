@@ -19,6 +19,7 @@ BarWidget {
     readonly property var storage: service.snapshot
     readonly property var disks: storage.disks || []
     readonly property var moves: storage.moves || []
+    readonly property var configuredDrives: storage.drives || []
     readonly property var chosenDisk: {
         for (var i=0;i<disks.length;i++) if(disks[i].id===selectedDiskId)return disks[i];
         return null;
@@ -164,6 +165,20 @@ BarWidget {
                             }
                         }
                         Text {width:content.width;visible:service.loaded && root.disks.length===0;text:"No supported disks detected. Network, RAID, LVM and loop topologies are not guessed.";font.family:Style.font.family;font.pixelSize:Style.font.body;color:root.ink;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                    }
+                    Column {
+                        width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview" && root.configuredDrives.length>0
+                        PanelSectionHeader {text:"CONFIGURED DATA DRIVES"}
+                        Repeater {
+                            model:root.configuredDrives.length
+                            Text {
+                                required property int index
+                                property var drive:root.configuredDrives[index]||({})
+                                readonly property string observedState:Model.configuredDriveState(drive,root.disks)
+                                width:content.width;text:Model.display(drive.name)+" · "+observedState+"\n"+Model.display(drive.mountpoint)
+                                color:observedState==="Mounted"?root.ink:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                            }
+                        }
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview"

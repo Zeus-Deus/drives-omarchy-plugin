@@ -46,11 +46,28 @@ class Server:
     def schedule(self,method,args,uid,secret=None):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
-        job={'id':uuid.uuid4().hex,'method':method,'state':'running','started':time.time()};self.jobs.append(job);self.jobs=self.jobs[-24:]
-        self.c.journal('jobs',job['id'],job)
-        for old in self.c.records('jobs'):
-            if old['id'] not in {j['id'] for j in self.jobs}:self.c.path('jobs',old['id']).unlink()
+        job={'id':uuid.uuid4().hex,'method':method,'state':'running','started':time.time()}
+        lease=None;leased=False
+        def release():
+            try:
+                if leased and lease is not None:lease.__exit__(None,None,None)
+            finally:self.worker_lock.release()
+        try:
+            lease=self.c.storage_lock();lease.__enter__();leased=True
+            from helper.maintenance import LATCH,RUNTIME
+            if os.path.lexists(LATCH) or os.path.lexists(RUNTIME):
+                raise Failure('maintenance controls require inspection before normal storage operations')
+            self.c.journal('jobs',job['id'],job)
+            self.jobs=(self.jobs+[job])[-24:]
+            for old in self.c.records('jobs'):
+                if old['id'] not in {j['id'] for j in self.jobs}:self.c.path('jobs',old['id']).unlink()
+        except BaseException:
+            self.jobs=[j for j in self.jobs if j['id']!=job['id']]
+            release()
+            raise
+        worker_started=threading.Event()
         def work():
+            worker_started.set()
             try:
                 manager=MoveManager(self.c,uid=None if uid==0 else uid)
                 if method=='ProvisionDrive':
@@ -71,11 +88,19 @@ class Server:
             except BaseException as exc:
                 job['state']='failed';job['error']=str(exc)[:300]
             finally:
-                self.c.journal('jobs',job['id'],job);self.worker_lock.release()
-                if self.draining:
-                    from gi.repository import GLib
-                    GLib.timeout_add(750,lambda:os._exit(75))
-        threading.Thread(target=work,daemon=True).start()
+                try:self.c.journal('jobs',job['id'],job)
+                finally:
+                    release()
+                    if self.draining:
+                        from gi.repository import GLib
+                        GLib.timeout_add(750,lambda:os._exit(75))
+        try:threading.Thread(target=work,daemon=True).start()
+        except BaseException as exc:
+            if not worker_started.is_set():
+                job['state']='failed';job['error']='Worker did not start: '+str(exc)[:250]
+                try:self.c.journal('jobs',job['id'],job)
+                finally:release()
+            raise
         return {'ok':True,'jobId':job['id']}
     def dispatch(self,connection,sender,object_path,interface,method,parameters,invocation):
         from gi.repository import GLib

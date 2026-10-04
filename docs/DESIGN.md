@@ -26,6 +26,16 @@ The legacy live-copy/cutover procedure is disabled: new normal-session moves jou
 
 ## Maintenance-mode migration (approved scope revision)
 
+The ordinary helper now acquires a root-private, no-follow, nonblocking flock
+on `/var/lib/drives-helper/storage.lock` before persisting a job. It retains
+that lease through terminal job persistence, and releases both the shared lease
+and the in-process admission lock on persistence or thread-start failure.
+Any persistent latch or runtime maintenance entry (including malformed,
+directory or dangling entries) refuses ordinary mutations before job creation.
+Independent-process tests and repeated installed D-Bus refusal/recovery have
+passed. This serializes the ordinary scheduler; it does not yet qualify an
+offline worker, storage admission, or detached storage/config workers.
+
 Ordinary-folder cutover requires explicit downtime. A live copy is only a seed;
 it never authorizes activation or cleanup. Normal-session StartMove prepares a
 journal and returns `awaiting-maintenance`, without renaming the live source.
@@ -66,7 +76,17 @@ must retain the normal-boot failure barrier. This is a once-per-normal-boot
 check, never a way to isolate an already-running session or establish a writer
 lease. Maintained activation exclusion, storage admission and the actual offline
 worker remain unqualified. Earlier inspect-only target probes alone do not
-qualify the audit.
+qualify the audit. The generator now emits type-wide activation conditions for
+service/socket/timer/path/mount/automount/swap/scope units and exact-name
+exemptions for the minimal audit closure. Current-boot runtime guards survive
+daemon-reload even after persistent latch release. A real synthetic-journal
+cold boot blocked direct and late services, socket, timer and path activations,
+including after reload and release, and returned a matching UART recovery ACK.
+Transient activation could not reach the absent system bus; that is not proof
+that a transient-unit condition ran. Mount/automount/swap/scope and selected
+storage admission remain unqualified. The guest later required resuming its
+preserved VM disk before ordinary-boot cleanup could be verified, so this run
+does not establish clean unattended recovery or production migration.
 The explicit uninstaller refuses any root latch or maintenance runtime entry
 (even empty, malformed or dangling), and any maintenance target state other than inactive. It checks
 again after stopping the ordinary helper, before disabling it or removing the

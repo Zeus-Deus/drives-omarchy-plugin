@@ -14,6 +14,8 @@ RUNTIME=pathlib.Path('/run/drives-maintenance')
 TARGET='/etc/systemd/system/drives-maintenance.target'
 MASKS=('graphical.target','multi-user.target','user@.service','timers.target','paths.target','sockets.target','display-manager.service')
 BOOT=re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+ACTIVATION_TYPES=('service','socket','timer','path','mount','automount','swap','scope')
+ACTIVATION_DROPIN='zzzz-drives-maintenance.conf'
 
 
 def private_directory(path,create=False):
@@ -88,14 +90,45 @@ def link(path,target):
     os.symlink(target,p)
 
 
+def activation_guards(early,runtime):
+    """Deny later unit activation for the whole maintenance boot.
+
+    Exact-name drop-ins shadow only our type-wide condition, preserving vendor
+    conditions. This is prevention infrastructure, not migration admission:
+    udev/direct process writers and boot/runtime provenance still need auditing.
+    """
+    from helper.maintenance_audit import CORE_SERVICES,CORE_SOCKETS,AUDIT_UNIT
+    for kind in ACTIVATION_TYPES:
+        directory=private_directory(early/(kind+'.d'),create=True)
+        atomic(directory/ACTIVATION_DROPIN,('[Unit]\nConditionPathExists=!'+str(runtime)+'\n').encode(),0o644)
+    for unit in CORE_SERVICES|CORE_SOCKETS|{AUDIT_UNIT}:
+        directory=private_directory(early/(unit+'.d'),create=True)
+        atomic(directory/ACTIVATION_DROPIN,b'[Unit]\n# Exempt only the owned type-wide activation condition.\n',0o644)
+
+
 def generate(early_dir,state_dir=STATE,runtime=RUNTIME,current_boot=None):
     """Generate only runtime units/receipt; never touch source or move journal."""
     if os.geteuid()!=0:raise Failure('maintenance generator requires root')
     state=pathlib.Path(state_dir)
+    runtime=pathlib.Path(runtime)
+    current_boot=boot_id() if current_boot is None else current_boot
+    if os.path.lexists(runtime):
+        # Releasing the persistent latch permits the NEXT boot only. Keep this
+        # boot's policy across daemon-reload, including a damaged runtime record.
+        early=private_directory(early_dir)
+        link(early/'default.target',TARGET)
+        for unit in MASKS:link(early/unit,'/dev/null')
+        private_directory(runtime)
+        try:
+            saved=control_json(runtime/'boot.json')
+            if saved.get('bootId')!=current_boot:raise Failure('stale maintenance runtime')
+        except (Failure,OSError,ValueError):
+            atomic(runtime/'boot.json',json.dumps({'version':1,'bootId':current_boot,'valid':False,'error':'Invalid maintenance runtime; retain the boot gate and inspect.'}).encode())
+        activation_guards(early,runtime)
+        return True
     try:os.lstat(LATCH)
     except FileNotFoundError:return False
     except OSError:pass # An unreadable latch is not permission to boot normally.
-    current_boot=boot_id() if current_boot is None else current_boot
     value=None
     try:
         value=latch_request()
@@ -112,6 +145,7 @@ def generate(early_dir,state_dir=STATE,runtime=RUNTIME,current_boot=None):
     receipt={'version':1,'bootId':current_boot,'valid':not error,'error':error}
     if value is not None:receipt.update(value)
     atomic(runtime/'boot.json',json.dumps(receipt,ensure_ascii=True).encode())
+    activation_guards(early,runtime)
     return True
 
 
