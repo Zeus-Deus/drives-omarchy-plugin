@@ -124,6 +124,7 @@ function ioRates(prev,cur) {
 // Key hints for the current view; only keys that actually do something there.
 function footerHints(view) {
     if(view==="overview")return [["j/k","move"],["⏎","open"],["a","add drive"],["m","move folder"],["esc","close"]];
+    if(view==="system")return [["j/k","move"],["⏎","move folder"],["r","measure again"],["esc","back"]];
     if(view==="progress")return [["esc","back"]];
     return [["j/k","move"],["⏎","choose"],["esc","back"]];
 }
@@ -147,6 +148,124 @@ function _drivePill(state,drive) {
     if(state==="Unfinished setup")return ["setup unfinished","bad"];
     return ["check identity","bad"];
 }
+// ---- drives and folders set up by hand ----------------------------------------
+// Same list as PROTECTED in helper/moves.py (a Node test keeps them equal).
+var PROTECTED=[".hermes",".claude",".codex",".codemux",".opencode",".config",".ssh",".gnupg",".mozilla",".password-store","keyrings","chromium","google-chrome","firefox","postgres","postgresql","mysql","mariadb"];
+// Why a home folder can't be moved, or "" when the helper would consider it.
+function moveBlocker(path) {
+    var parts=String(path||"").split("/").filter(function(x){return x!=="";});
+    if(parts.length<3||parts[0]!=="home")return "outside your home folder";
+    for(var i=0;i<parts.length;i++)if(PROTECTED.indexOf(parts[i].toLowerCase())>=0)return "app profile or settings · stays on the OS disk";
+    return "";
+}
+// Folder sizes stream in from `bridge.py --sizes`, one JSON line at a time.
+function emptySizes(started){return {started:!!started,home:"",steam:"",entries:[],extras:{},homeBytes:null,done:false,complete:false,error:""};}
+function addSizeLine(sizes,line) {
+    var o;try{o=JSON.parse(line);}catch(e){return sizes;}
+    if(!o||typeof o!=="object")return sizes;
+    var s={started:true,home:sizes.home,steam:sizes.steam,entries:sizes.entries,extras:sizes.extras,homeBytes:sizes.homeBytes,done:sizes.done,complete:sizes.complete,error:sizes.error};
+    if(typeof o.home==="string"&&o.kind===undefined){s.home=o.home;s.steam=String(o.steam||"");}
+    else if(o.kind==="entry"&&typeof o.path==="string"&&typeof o.bytes==="number"&&s.entries.length<512)s.entries=s.entries.concat([{path:o.path,bytes:o.bytes}]);
+    else if(o.kind==="home"&&typeof o.bytes==="number")s.homeBytes=o.bytes;
+    else if(o.kind==="extra"&&typeof o.path==="string"){var x={};for(var k in s.extras)x[k]=s.extras[k];x[o.path]=typeof o.bytes==="number"?o.bytes:null;s.extras=x;}
+    else if(o.done){s.done=true;s.complete=!!o.complete;s.error=display(o.error||"");}
+    return s;
+}
+// The status snapshot with the latest folder sizes attached.
+function withSizes(snapshot,sizes) {
+    var out={};for(var k in snapshot)out[k]=snapshot[k];
+    out.sizes=sizes||emptySizes();return out;
+}
+function _sizeOf(snapshot,path) {
+    var s=snapshot.sizes||{};
+    if(s.extras&&Object.prototype.hasOwnProperty.call(s.extras,path))return s.extras[path];
+    var e=s.entries||[];for(var i=0;i<e.length;i++)if(e[i].path===path)return e[i].bytes;
+    return undefined;
+}
+// Folders the size scan should measure besides home: hand-made binds on drives.
+function sizePaths(snapshot) {
+    var out=[];(snapshot.disks||[]).forEach(function(d){manualBinds(snapshot,d).forEach(function(b){if(out.length<16)out.push(b.source);});});
+    return out;
+}
+// Bind mounts from a data disk that Drives did not create (e.g. a hand-made
+// fstab line `/data/Projects ~/Projects none bind`). Read from the kernel's
+// mount table, so they show exactly what is mounted now.
+function manualBinds(snapshot,disk) {
+    var mounts=(disk&&disk.mounts)||[],u=_usage(disk,"");
+    if(!u||disk.system)return [];
+    var main=null;mounts.forEach(function(m){if(m.target===u.target)main=m;});
+    if(!main)return [];
+    var managed={};(snapshot.moves||[]).forEach(function(m){if(m.bound&&FINISHED.indexOf(m.state)>=0)managed[m.source]=1;});
+    var seen={},kept=[];
+    function inside(t,p){return t.indexOf(p.replace(/\/$/,"")+"/")===0;}
+    // Shortest paths first, so mounts nested inside another bind (or inside
+    // the drive itself, e.g. Docker's own layers) are not listed as folders.
+    return mounts.slice().sort(function(a,b){return a.target.length-b.target.length;}).filter(function(m){
+        if(m.target===main.target||managed[m.target]||seen[m.target]||m.source!==main.source)return false;
+        if(inside(m.target,main.target)||kept.some(function(k){return inside(m.target,k);}))return false;
+        seen[m.target]=1;kept.push(m.target);return true;
+    }).map(function(m){
+        var rel=String(m.fsroot||"").replace(/\/+$/,""),base=String(main.fsroot||"/").replace(/\/+$/,"");
+        var from=rel.indexOf(base)===0?display(u.target.replace(/\/$/,"")+rel.slice(base.length)):display(rel);
+        var b=_sizeOf(snapshot,m.target);
+        return {source:m.target,from:from,bytes:typeof b==="number"?b:0,sized:typeof b==="number",bound:true,oldCopy:false,manual:true,destMount:u.target};
+    });
+}
+// What fills the OS disk: top-level folders of home (measured on the OS disk
+// only, so folders already on a drive are not counted), biggest first, then
+// everything outside home. Hidden folders are app data: shown, not offered.
+function spaceRows(snapshot,limit) {
+    var s=snapshot.sizes||{},mounted={},planned={},sys=systemDisks(snapshot)[0],steam=s.steam||"";
+    visibleMoves(snapshot.moves||[]).forEach(function(m){if(FINISHED.indexOf(m.state)<0)planned[m.source]=1;});
+    (snapshot.mounts||[]).forEach(function(m){mounted[m.target]=1;});
+    var all=(s.entries||[]).filter(function(e){return !mounted[e.path]&&e.bytes>0;}).sort(function(a,b){return b.bytes-a.bytes;});
+    var rows=all.slice(0,limit||12).map(function(e,i){
+        var name=e.path.split("/").pop(),why=moveBlocker(e.path);
+        if(!why&&name.charAt(0)===".")why=steam&&steam.indexOf(e.path+"/")===0?"holds Steam · move the games under Apps":"hidden app folder · stays on the OS disk";
+        if(!why&&planned[e.path])why="move already planned";
+        return {path:e.path,title:shortPath(e.path),bytes:e.bytes,size:compact(e.bytes),color:i%4,movable:why==="",why:why};
+    });
+    var home=all.reduce(function(a,e){return a+e.bytes;},0);
+    if(sys&&sys.usage&&s.done){
+        var rest=Math.max(0,sys.usage.used-(typeof s.homeBytes==="number"?s.homeBytes:home));
+        if(rest>0)rows.push({path:"",title:"System, apps & snapshots",bytes:rest,size:compact(rest),color:-1,movable:false,why:"outside your home folder"});
+    }
+    return rows;
+}
+// OS-disk meter: one segment per listed home folder.
+function systemSegments(snapshot) {
+    var sys=systemDisks(snapshot)[0];if(!sys||!sys.usage||!sys.usage.total)return [];
+    return spaceRows(snapshot).filter(function(r){return r.color>=0;}).map(function(r){return {color:r.color,fraction:Math.min(1,r.bytes/sys.usage.total)};});
+}
+// The data drive a path is bind-mounted from, or null when it is on the OS disk.
+function _driveMount(d){var u=_usage(d,"");return u?display(u.target):display(d.model);}
+function driveFor(snapshot,path) {
+    var mounts=snapshot.mounts||[];
+    for(var i=0;i<mounts.length;i++)if(mounts[i].target===path){
+        var src=mounts[i].source,d=(snapshot.disks||[]).filter(function(x){return !x.system&&(x.mounts||[]).some(function(m){return m.source===src;});})[0];
+        if(d)return d;
+    }
+    return null;
+}
+// Big app data Omarchy installs: Steam's game library and Docker's data root.
+function appRows(snapshot) {
+    var out=[],apps=snapshot.apps||{},s=snapshot.sizes||{};
+    var steam=apps.steam||s.steam||"";
+    if(steam){
+        var b=_sizeOf(snapshot,steam),d=driveFor(snapshot,steam);
+        out.push({id:"steam",icon:"󰓓",title:"Steam games",path:steam,size:typeof b==="number"?compact(b):"",
+            sub:shortPath(steam)+(typeof b==="number"?" · "+compact(b):(s.started&&!s.done?" · measuring…":"")),
+            status:d?"● on "+_driveMount(d):"on the OS disk",tone:d?"ok":"dim",movable:!d&&moveBlocker(steam)==="",
+            hint:d?"":"Quit Steam, then move the library here. Steam keeps using the same folder."});
+    }
+    if(apps.docker){
+        var dk=driveFor(snapshot,"/var/lib/docker"),db=_sizeOf(snapshot,"/var/lib/docker");
+        out.push({id:"docker",icon:"󰡨",title:"Docker",path:"/var/lib/docker",size:typeof db==="number"?compact(db):"",
+            sub:"/var/lib/docker"+(typeof db==="number"&&db>0?" · "+compact(db):""),status:dk?"● on "+_driveMount(dk):"on the OS disk",tone:dk?"ok":"dim",movable:false,
+            hint:dk?"Bound from the data drive.":"Moving Docker's data from the panel isn't supported yet."});
+    }
+    return out;
+}
 // Rows for the DATA section: every configured drive (present or not) and any
 // other mounted encrypted data disk. Each row carries its meter segments.
 function dataDrives(snapshot) {
@@ -155,7 +274,7 @@ function dataDrives(snapshot) {
         var disk=null;disks.forEach(function(x){if(x.byId===d.byId&&x.serial===d.serial&&d.serial)disk=x;});
         if(disk)used[disk.id]=true;
         var state=configuredDriveState(d,disks),pill=_drivePill(state,d),u=_usage(disk,d.mountpoint);
-        var folders=movedFolders(d.mountpoint,moves);
+        var folders=movedFolders(d.mountpoint,moves).concat(manualBinds(snapshot,disk));
         var segs=[];if(u&&u.total>0)folders.forEach(function(f,i){segs.push({color:i%4,fraction:Math.min(1,f.bytes/u.total)});});
         var other=u&&u.total>0?Math.max(0,u.used/u.total-segs.reduce(function(a,s){return a+s.fraction;},0)):0;
         var h=disk?health(disk,snapshot.health):{state:"unknown",label:"",reason:""};
@@ -167,10 +286,14 @@ function dataDrives(snapshot) {
     });
     disks.forEach(function(x){
         if(used[x.id]||x.system||!x.encrypted||!(x.mounts||[]).length)return;
-        var u=_usage(x,"");
-        out.push({key:"disk:"+x.id,drive:null,disk:x,title:display(x.model),size:compact(x.size),pill:"LUKS · not set up by Drives",tone:"dim",
-            state:"Mounted",usage:u,segments:[],other:u&&u.total?u.used/u.total:0,sub:u?display(u.target)+" · "+compact(u.used)+" used · "+compact(u.free)+" free":"",
-            health:health(x,snapshot.health),fix:{action:"",hint:""},folders:[],problem:false});
+        var u=_usage(x,""),folders=manualBinds(snapshot,x);
+        var segs=[];if(u&&u.total>0)folders.forEach(function(f,i){if(f.bytes>0)segs.push({color:i%4,fraction:Math.min(1,f.bytes/u.total)});});
+        var other=u&&u.total>0?Math.max(0,u.used/u.total-segs.reduce(function(a,s){return a+s.fraction;},0)):0;
+        // Opened at boot from a keyfile in crypttab = the same thing Drives sets up.
+        var pill=x.bootUnlock==="keyfile"?"unlocks with OS":(x.bootUnlock==="prompt"?"asks at boot":"opened by hand");
+        out.push({key:"disk:"+x.id,drive:null,disk:x,manual:true,title:display(x.model),size:compact(x.size),pill:pill,tone:x.bootUnlock==="keyfile"?"ok":"dim",
+            state:"Mounted",usage:u,segments:segs,other:other,sub:u?display(u.target)+" · "+compact(u.used)+" used · "+compact(u.free)+" free · set up by hand":"",
+            health:health(x,snapshot.health),fix:{action:"",hint:""},folders:folders,problem:false});
     });
     return out;
 }
@@ -204,13 +327,27 @@ function suggestMount(snapshot) {
 }
 // Mounted Drives destinations a folder can move to.
 function moveTargets(snapshot) {
-    return dataDrives(snapshot).filter(function(r){return r.drive&&r.state==="Mounted"&&r.drive.autoUnlock!==false;})
-        .map(function(r){return {mountpoint:r.drive.mountpoint,title:r.title,free:r.usage?r.usage.free:0};});
+    return dataDrives(snapshot).filter(function(r){return r.state==="Mounted"&&(r.drive?r.drive.autoUnlock!==false:targetIssue(r)==="");})
+        .map(function(r){return {mountpoint:r.drive?r.drive.mountpoint:r.usage.target,title:r.title,free:r.usage?r.usage.free:0};});
+}
+// Why folders can't be moved onto a drive set up by hand, or "". The helper
+// checks the same things again (helper/moves.py preflight).
+function targetIssue(r) {
+    if(!r||r.drive)return "";
+    var d=r.disk||{},u=r.usage;
+    if(!u)return "This drive isn't mounted.";
+    if(d.bootUnlock!=="keyfile")return "Folders can only move onto a drive that unlocks with the OS (a keyfile in crypttab).";
+    if(u.rootOwned!==true)return display(u.target)+" is owned by your user, so the helper won't move folders into it (another program running as you could swap the folder mid-move). To allow it: sudo chown root:root "+display(u.target)+" && sudo chmod 755 "+display(u.target)+". Your existing folders on it keep working.";
+    return "";
+}
+// Drives that are mounted but can't take a moved folder, with the reason.
+function blockedTargets(snapshot) {
+    return dataDrives(snapshot).filter(function(r){return !r.drive&&r.state==="Mounted"&&targetIssue(r)!=="";})
+        .map(function(r){return {title:r.title,mount:r.usage?display(r.usage.target):"",issue:targetIssue(r)};});
 }
 // Rows for the MOVED FOLDERS section, colour-matched to their drive's meter.
 function folderRows(snapshot) {
-    var moves=visibleMoves(snapshot.moves||[]),pending=snapshot.restartPending,idx={},width=0;
-    moves.forEach(function(m){width=Math.max(width,shortPath(m.source).length);});
+    var moves=visibleMoves(snapshot.moves||[]),pending=snapshot.restartPending,idx={},width=_folderWidth(snapshot);
     dataDrives(snapshot).forEach(function(r){(r.folders||[]).forEach(function(f,i){idx[f.source+"\u0000"+(r.drive&&r.drive.mountpoint)]=i%4;});});
     return moves.map(function(m){
         var stage=moveStage(m,pending),c=idx[m.source+"\u0000"+m.destMount];
@@ -221,6 +358,25 @@ function folderRows(snapshot) {
         // The font is monospaced: padding the source lines up the arrows.
         var src=shortPath(m.source),pad=src+new Array(Math.max(0,Math.min(width,28)-src.length)+1).join(" ");
         return {id:m.id,move:m,source:src,label:pad+" → "+display(m.destMount),dest:display(m.destMount),status:status,tone:tone,color:c===undefined?-1:c};
+    });
+}
+// Widest source path over every folder row, so all arrows share one column.
+function _folderWidth(snapshot) {
+    var w=0,apps={};appRows(snapshot).forEach(function(a){apps[a.path]=1;});
+    visibleMoves(snapshot.moves||[]).forEach(function(m){w=Math.max(w,shortPath(m.source).length);});
+    (snapshot.disks||[]).forEach(function(d){manualBinds(snapshot,d).forEach(function(b){if(!apps[b.source])w=Math.max(w,shortPath(b.source).length);});});
+    return Math.min(w,28);
+}
+// Folders on drives that were bound by hand, for the MOVED FOLDERS list.
+function manualFolderRows(snapshot) {
+    var out=[],width=_folderWidth(snapshot),apps={};
+    appRows(snapshot).forEach(function(a){apps[a.path]=1;});
+    // App data (Docker, Steam) is listed once, under APPS.
+    (snapshot.disks||[]).forEach(function(d){manualBinds(snapshot,d).forEach(function(b){if(!apps[b.source]){b.drive=d;out.push(b);}});});
+    return out.map(function(b,i){
+        var src=shortPath(b.source),pad=src+new Array(Math.max(0,Math.min(width,28)-src.length)+1).join(" ");
+        return {id:"manual:"+b.source,path:b.source,diskId:b.drive.id,source:src,label:pad+" → "+b.from,from:b.from,size:b.sized?compact(b.bytes):"",
+            status:"● mounted",tone:"ok",color:i%4,manual:true};
     });
 }
 // Flat keyboard order of the overview: data drives, new disks, folders.

@@ -28,7 +28,7 @@ BarWidget {
 
     readonly property bool opened: controller.open
     readonly property bool popoutSwitchClosing: controller.popoutSwitchClosing
-    readonly property var storage: service.snapshot
+    readonly property var storage: Model.withSizes(service.snapshot, service.sizes)
     readonly property var disks: storage.disks || []
     readonly property var moves: Model.visibleMoves(storage.moves || [])
     readonly property var pendingRestart: storage.restartPending || null
@@ -44,6 +44,13 @@ BarWidget {
     readonly property var alertRows: Model.alerts(storage)
     readonly property var candidates: Model.addCandidates(storage)
     readonly property var targets: Model.moveTargets(storage)
+    readonly property var manualRows: Model.manualFolderRows(storage)
+    readonly property var apps: Model.appRows(storage)
+    readonly property var spaceRows: Model.spaceRows(storage)
+    readonly property var sysRow: systemRows.length ? systemRows[0] : null
+    // Measure hand-made bind mounts as soon as the drive list shows them.
+    readonly property string sizeKey: JSON.stringify(Model.sizePaths(service.snapshot))
+    onSizeKeyChanged: if (opened && service.loaded) service.scanSizes(JSON.parse(sizeKey), false)
     readonly property var chosenDrive: {
         for (var i = 0; i < driveRows.length; i++) if (driveRows[i].key === selectedKey) return driveRows[i];
         return null;
@@ -71,10 +78,16 @@ BarWidget {
     readonly property var nav: {
         var out = [];
         if (view === "overview") {
+            if (sysRow) out.push({kind: "sys", id: sysRow.key});
             driveRows.forEach(function(r) { out.push({kind: "drive", id: r.key}); });
             newRows.forEach(function(c) { out.push({kind: "new", id: c.id}); });
             folderRows.forEach(function(f) { out.push({kind: "move", id: f.id}); });
+            manualRows.forEach(function(f) { out.push({kind: "manual", id: f.id}); });
+            apps.forEach(function(a) { out.push({kind: "app", id: a.id}); });
             if (restartArmed) out.push({kind: "act", id: "restart"});
+        } else if (view === "system") {
+            spaceRows.forEach(function(r) { if (r.movable) out.push({kind: "space", id: r.path}); });
+            apps.forEach(function(a) { if (a.movable) out.push({kind: "app", id: a.id}); });
         } else if (view === "drive" && chosenDrive) {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
             folderRows.forEach(function(f) { if (cdConfigured && f.move.destMount === chosenDrive.drive.mountpoint) out.push({kind: "move", id: f.id}); });
@@ -106,6 +119,8 @@ BarWidget {
         if (view === "add")
             return addStep === 1 ? ["󰋊", "Add drive", "step 1 of 2 · choose the disk"] : ["󰌾", "Encryption & unlock", "step 2 of 2 · how this disk opens"];
         if (view === "move") return ["󰉒", "Move folder", "keeps its path · moves during a restart"];
+        if (view === "system" && sysRow)
+            return ["󰋊", sysRow.title, "OS disk · " + (sysRow.usage ? Model.compact(sysRow.usage.used) + " used · " + Model.compact(sysRow.usage.free) + " free" : "")];
         if (view === "resume" && chosenMove) {
             var stage = Model.moveStage(chosenMove, pendingRestart);
             return [stage.indexOf("moved") === 0 || stage === "cleaned" ? "󰄬" : (Model.warning({moves: [chosenMove], restartPending: pendingRestart}) ? "󰀦" : "󰉒"),
@@ -129,7 +144,7 @@ BarWidget {
     implicitHeight: button.implicitHeight
 
     // ---- actions --------------------------------------------------------------
-    function open() { controller.open = true; service.opened = true; }
+    function open() { controller.open = true; service.opened = true; Qt.callLater(function() { service.scanSizes(Model.sizePaths(root.storage), false); }); }
     function close() { confirm.opened = false; controller.open = false; service.opened = false; }
     function closeForPopoutSwitch() { controller.popoutSwitchClosing = true; close(); Qt.callLater(function() { controller.popoutSwitchClosing = false; }); }
     function go(where) { view = where; cursor = 0; flick.contentY = 0; catcher.forceActiveFocus(); }
@@ -143,6 +158,16 @@ BarWidget {
     }
     function openDrive(key) { selectedKey = key; go("drive"); }
     function openMove(id) { selectedMoveId = id; go("resume"); }
+    function openSystem() { go("system"); service.scanSizes(Model.sizePaths(storage), false); }
+    function openApp(id) {
+        for (var i = 0; i < apps.length; i++) if (apps[i].id === id) {
+            if (apps[i].movable) openMoveFolder(apps[i].path, "");
+            else if (id === "docker") { var d = Model.driveFor(storage, "/var/lib/docker"); if (d) openDiskRow(d.id); }
+            return;
+        }
+    }
+    function openManual(id) { for (var i = 0; i < manualRows.length; i++) if (manualRows[i].id === id) return openDiskRow(manualRows[i].diskId); }
+    function openDiskRow(diskId) { for (var i = 0; i < driveRows.length; i++) if (driveRows[i].disk && driveRows[i].disk.id === diskId) return openDrive(driveRows[i].key); }
     function openAdd(id) {
         var s = Model.suggestMount(storage);
         nameField.text = s.name; mountField.text = s.mountpoint; serialField.text = "";
@@ -169,6 +194,10 @@ BarWidget {
     function activate() { var n = nav[cursor]; if (n) run(n); }
     function run(n) {
         if (n.kind === "drive") openDrive(n.id);
+        else if (n.kind === "sys") openSystem();
+        else if (n.kind === "space") openMoveFolder(n.id, "");
+        else if (n.kind === "app") openApp(n.id);
+        else if (n.kind === "manual") openManual(n.id);
         else if (n.kind === "new") openAdd(n.id);
         else if (n.kind === "move") openMove(n.id);
         else if (n.kind === "pick") { selectedDiskId = n.id; serialField.forceActiveFocus(); }
@@ -493,6 +522,7 @@ BarWidget {
             onMoveRequested: function(dx, dy) { root.moveCursor(dy); }
             onActivateRequested: root.activate()
             onTextKey: function(t) {
+                if (root.view === "system" && t === "r") { service.scanSizes(Model.sizePaths(root.storage), true); return; }
                 if (root.view !== "overview") return;
                 if (t === "r") service.refresh();
                 else if (t === "a" && root.storage.helperAvailable) root.openAdd("");
@@ -596,15 +626,18 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var r: root.systemRows[index] || ({})
-                                selectable: false
-                                opacity: 1
+                                readonly property var segs: Model.systemSegments(root.storage)
+                                navIndex: root.navIndex("sys", r.key)
                                 icon: "󰋊"
                                 title: r.title || ""
                                 pillLabel: r.pill || ""
                                 pillTone: r.tone || "dim"
                                 sub: r.sub || ""
                                 showMeter: !!r.usage
-                                other: r.other || 0
+                                segments: segs
+                                other: Math.max(0, (r.other || 0) - segs.reduce(function(a, x) { return a + x.fraction; }, 0))
+                                trail: "What's using it"
+                                onChosen: root.openSystem()
                             }
                         }
 
@@ -618,7 +651,7 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var r: root.driveRows[index] || ({})
-                                navIndex: index
+                                navIndex: root.navIndex("drive", r.key)
                                 icon: "󰋊"
                                 iconColor: r.problem ? Color.urgent : root.ink
                                 title: r.title || ""
@@ -639,7 +672,7 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var c: root.newRows[index] || ({})
-                                navIndex: root.driveRows.length + index
+                                navIndex: root.navIndex("new", c.id)
                                 icon: "󰋊"
                                 title: c.title || ""
                                 pillLabel: "new"
@@ -652,11 +685,12 @@ BarWidget {
                         }
 
                         SectionHead {
-                            visible: root.folderRows.length > 0
+                            readonly property int count: root.folderRows.length + root.manualRows.length
+                            visible: count > 0
                             label: "MOVED FOLDERS"
                             trail: {
                                 var n = Model.reclaimable(root.storage.moves || []);
-                                return n > 0 ? Model.compact(n) + " old copies on OS disk" : root.folderRows.length + (root.folderRows.length === 1 ? " folder" : " folders");
+                                return n > 0 ? Model.compact(n) + " old copies on OS disk" : count + (count === 1 ? " folder" : " folders");
                             }
                         }
                         Repeater {
@@ -664,13 +698,44 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var f: root.folderRows[index] || ({})
-                                navIndex: root.driveRows.length + root.newRows.length + index
+                                navIndex: root.navIndex("move", f.id)
                                 icon: "■"
                                 iconColor: f.color >= 0 ? root.segColor(f.color) : root.dim
                                 title: f.label || ""
                                 trail: f.status || ""
                                 trailColor: root.toneColor(f.tone)
                                 onChosen: root.openMove(f.id)
+                            }
+                        }
+                        // Bind mounts made by hand on a data drive (read-only view).
+                        Repeater {
+                            model: root.manualRows.length
+                            NavRow {
+                                required property int index
+                                readonly property var f: root.manualRows[index] || ({})
+                                navIndex: root.navIndex("manual", f.id)
+                                icon: "■"
+                                iconColor: root.segColor(f.color)
+                                title: f.label || ""
+                                trail: (f.size ? f.size + "  " : "") + (f.status || "")
+                                trailColor: root.toneColor(f.tone)
+                                onChosen: root.openManual(f.id)
+                            }
+                        }
+
+                        SectionHead { visible: root.apps.length > 0; label: "APPS"; trail: "big app data" }
+                        Repeater {
+                            model: root.apps.length
+                            NavRow {
+                                required property int index
+                                readonly property var a: root.apps[index] || ({})
+                                navIndex: root.navIndex("app", a.id)
+                                icon: a.icon || "󰏗"
+                                title: a.title || ""
+                                sub: a.sub || ""
+                                trail: a.movable ? "Move to drive" : (a.status || "")
+                                trailColor: a.movable ? root.ink : root.toneColor(a.tone)
+                                onChosen: root.openApp(a.id)
                             }
                         }
                         ActionRow { visible: root.restartArmed; op: "restart" }
@@ -684,6 +749,80 @@ BarWidget {
                             topPadding: Style.space(4)
                             text: "VM test mode · this OS disk is not encrypted"
                             font.pixelSize: Style.font.caption
+                        }
+                    }
+
+                    // ================= OS disk · what takes space =================
+                    Column {
+                        width: content.width
+                        spacing: Style.space(4)
+                        visible: root.view === "system" && root.sysRow !== null
+
+                        Row {
+                            spacing: Style.space(6)
+                            Pill { label: root.sysRow ? root.sysRow.pill : ""; tone: root.sysRow ? root.sysRow.tone : "dim" }
+                            Pill {
+                                readonly property var h: root.sysRow ? root.sysRow.health : ({state: "unknown", label: ""})
+                                label: h.state === "unknown" ? "" : String(h.label).replace("Health: ", "health ")
+                                tone: h.state === "failing" || h.state === "warning" ? "bad" : (h.state === "passed" ? "ok" : "dim")
+                            }
+                        }
+                        Meter {
+                            readonly property var segs: Model.systemSegments(root.storage)
+                            width: content.width
+                            visible: root.sysRow !== null && !!root.sysRow.usage
+                            segments: segs
+                            other: root.sysRow ? Math.max(0, root.sysRow.other - segs.reduce(function(a, x) { return a + x.fraction; }, 0)) : 0
+                        }
+                        Note {
+                            text: !root.storage.sizes.started ? "" : (!root.storage.sizes.done ? "Measuring your home folder… big folders appear as they finish. Nothing is changed."
+                                : (root.storage.sizes.complete ? "Measured just now. Folders already on a data drive aren't counted here." : "Measured what it could in time; some folders may be missing. Press r to measure again."))
+                            visible: text !== ""
+                        }
+
+                        SectionHead { label: "WHAT TAKES SPACE"; trail: root.spaceRows.length ? "biggest first" : "" }
+                        Repeater {
+                            model: root.spaceRows.length
+                            NavRow {
+                                required property int index
+                                readonly property var r: root.spaceRows[index] || ({})
+                                selectable: r.movable === true
+                                opacity: r.movable ? 1 : 0.7
+                                navIndex: root.navIndex("space", r.path)
+                                icon: "■"
+                                iconColor: r.color >= 0 ? root.segColor(r.color) : root.dim
+                                title: r.title || ""
+                                sub: r.movable ? "" : (r.why || "")
+                                trail: r.size || ""
+                                trailColor: r.movable ? root.ink : root.dim
+                                onChosen: root.openMoveFolder(r.path, "")
+                            }
+                        }
+
+                        SectionHead { visible: root.apps.some(function(a) { return a.movable; }); label: "APPS"; trail: "" }
+                        Repeater {
+                            model: root.apps.length
+                            NavRow {
+                                required property int index
+                                readonly property var a: root.apps[index] || ({})
+                                visible: a.movable === true
+                                height: visible ? implicitHeight : 0
+                                navIndex: root.navIndex("app", a.id)
+                                icon: a.icon || "󰏗"
+                                title: a.title || ""
+                                sub: (a.sub || "") + (a.hint ? "\n" + a.hint : "")
+                                trail: a.size || ""
+                                onChosen: root.openApp(a.id)
+                            }
+                        }
+                        Repeater {
+                            model: Model.blockedTargets(root.storage).length
+                            Card {
+                                required property int index
+                                readonly property var b: Model.blockedTargets(root.storage)[index] || ({})
+                                Text { width: parent.width; text: "Moving folders onto " + (b.title || "") + " (" + (b.mount || "") + ")"; color: root.ink; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                                Text { width: parent.width; text: b.issue || ""; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                            }
                         }
                     }
 
@@ -714,7 +853,27 @@ BarWidget {
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "reconnect"; op: "reconnect" }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "recover"; op: "recover" }
 
-                        SectionHead { visible: (root.cd.folders || []).length > 0; label: "MOVED HERE"; trail: "" }
+                        Note { visible: root.cd.manual === true; text: "Set up outside this panel. Drives shows it and its folders but doesn't change its crypttab or fstab lines."; }
+                        Note { visible: root.cd.manual === true && Model.targetIssue(root.cd) !== ""; text: Model.targetIssue(root.cd) }
+                        SectionHead { visible: (root.cd.folders || []).length > 0; label: "FOLDERS ON THIS DRIVE"; trail: "" }
+                        Repeater {
+                            model: root.manualRows.length
+                            NavRow {
+                                required property int index
+                                readonly property var f: root.manualRows[index] || ({})
+                                visible: root.cd.disk !== undefined && root.cd.disk !== null && f.diskId === root.cd.disk.id
+                                height: visible ? implicitHeight : 0
+                                navIndex: root.navIndex("manual", f.id)
+                                selectable: false
+                                opacity: 1
+                                icon: "■"
+                                iconColor: root.segColor(f.color)
+                                title: f.source || ""
+                                sub: "from " + (f.from || "") + (f.size ? " · " + f.size : "") + " · bound by hand"
+                                trail: f.status || ""
+                                trailColor: root.toneColor(f.tone)
+                            }
+                        }
                         Repeater {
                             model: root.folderRows.length
                             NavRow {
@@ -884,7 +1043,11 @@ BarWidget {
                                 onChosen: root.moveTarget = t.mountpoint
                             }
                         }
-                        Note { visible: root.targets.length === 0; text: "No drive can take a folder yet. Set up a drive that unlocks with Omarchy first." }
+                        Note { visible: root.targets.length === 0 && Model.blockedTargets(root.storage).length === 0; text: "No drive can take a folder yet. Set up a drive that unlocks with Omarchy first." }
+                        Repeater {
+                            model: root.targets.length === 0 ? Model.blockedTargets(root.storage).length : 0
+                            Note { required property int index; text: Model.blockedTargets(root.storage)[index].issue }
+                        }
                         SectionHead { label: "WHAT HAPPENS"; trail: "" }
                         Repeater {
                             model: [
@@ -1000,7 +1163,7 @@ BarWidget {
     IpcHandler {
         target: "drives"
         function status(): string {
-            return JSON.stringify({opened: root.opened, view: root.view, addStep: root.addStep, cursor: root.cursor, nav: root.nav, heading: root.heading,
+            return JSON.stringify({sizes: root.storage.sizes, spaceRows: root.spaceRows, apps: root.apps, manualRows: root.manualRows, driveRows: root.driveRows.map(function(r) { return {title: r.title, pill: r.pill, sub: r.sub, folders: r.folders.length}; }),opened: root.opened, view: root.view, addStep: root.addStep, cursor: root.cursor, nav: root.nav, heading: root.heading,
                 contentY: flick.contentY, contentHeight: flick.contentHeight, height: flick.height,
                 confirmOpen: confirm.opened, confirmSelection: confirm.selectedIndex, confirmMessage: confirm.message,
                 snapshot: root.storage, rates: service.rates, footer: Model.footerHints(root.view).map(function(h) { return h.join(" "); }).join(" · "),
@@ -1011,6 +1174,7 @@ BarWidget {
         function refresh(): void { service.refresh(); }
         function goto(view: string): string {
             if (view === "overview") root.go("overview");
+            else if (view === "system") root.openSystem();
             else if (view === "add") root.openAdd("");
             else if (view === "move") root.openMoveFolder("", "");
             else return "invalid";

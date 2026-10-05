@@ -69,7 +69,8 @@ def classify(block,mounts,usage):
             members={a[0]['name'] for cs in indexed.values() for a in cs if fsuuid and a[-1].get('uuid')==fsuuid and a[-1].get('fstype')=='btrfs'}
             if len(members)>1:supported=False
         path=by_id(disk['name'])
-        out.append({'id':ident,'byId':path,'name':disk['name'],'model':clean(disk.get('model') or 'System drive'),'serial':disk.get('serial') or '',
+        mapper=next((os.path.basename(n['name']) for c in related for n in c if n.get('type')=='crypt'),'')
+        out.append({'mapper':mapper,'id':ident,'byId':path,'name':disk['name'],'model':clean(disk.get('model') or 'System drive'),'serial':disk.get('serial') or '',
             'displaySerial':clean(disk.get('serial')),'encryptedObject':next(('/org/freedesktop/UDisks2/block_devices/'+''.join(ch if ch.isalnum() else '_%02x'%ord(ch) for ch in os.path.basename(c[-1]['name'])) for c in related if c[-1].get('fstype')=='crypto_LUKS'),''),'size':int(disk.get('size') or 0),'system':disk['name'] in system,'encrypted':crypt,
             'mounts':volume_mounts,'state':'unsupported' if not supported else ('mounted' if volume_mounts else ('unlocked' if open_crypt else ('locked' if crypt else 'new'))),
             'selectable':supported and disk['name'] not in system and not volume_mounts and bool(path and disk.get('serial')),
@@ -92,19 +93,70 @@ def diskstats(text=None):
         except ValueError:continue
     return out
 
+GENERATOR='/run/systemd/generator'
+
+def boot_unlock(mapper,root=GENERATOR):
+    """How systemd opens this mapper at boot, read from the unit its crypttab
+    generator wrote (crypttab itself is root-only): 'keyfile', 'prompt', or ''
+    when nothing opens it at boot."""
+    if not re.fullmatch('[A-Za-z0-9_.-]{1,64}',mapper or ''):return ''
+    try:text=pathlib.Path(root,'systemd-cryptsetup@'+mapper+'.service').read_text()[:16384]
+    except OSError:return ''
+    m=re.search(r"^ExecStart=\S+ attach '([^']*)' '([^']*)' '([^']*)'",text,re.M)
+    if not m or m.group(1)!=mapper:return ''
+    return 'prompt' if m.group(3) in ('','-','none') else 'keyfile'
+
+def du(args,budget,emit=None,argv0=('ionice','-c3','nice','-n19','du')):
+    """Run `du -x -B1 <args>` for at most `budget` seconds (read-only). du
+    prints each directory as soon as it is measured; each finished line is
+    passed to emit() right away, so a slow tree never hides the others.
+    Returns (entries, complete); complete is False on timeout."""
+    import selectors,subprocess,time
+    p=subprocess.Popen([*argv0,'-x','-B1',*args],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,
+        env={'PATH':'/usr/bin:/bin','LC_ALL':'C'},start_new_session=True)
+    pipe=p.stdout;assert pipe is not None
+    buf=b'';entries=[];complete=True;end=time.monotonic()+max(0.1,budget)
+    sel=selectors.DefaultSelector();sel.register(pipe,selectors.EVENT_READ)
+    def take(line):
+        size,_,path=line.decode('utf-8','replace').partition('\t')
+        if size.isdigit() and path:
+            e={'path':path,'bytes':int(size)};entries.append(e)
+            if emit:emit(e)
+    try:
+        while True:
+            left=end-time.monotonic()
+            if left<=0:complete=False;break
+            if not sel.select(min(left,.5)):continue
+            chunk=os.read(pipe.fileno(),65536)
+            if not chunk:break
+            buf+=chunk
+            *lines,buf=buf.split(b'\n')
+            for line in lines:take(line)
+            if len(buf)>65536 or len(entries)>4096:complete=False;break
+    finally:
+        if p.poll() is None:
+            try:os.killpg(p.pid,9)
+            except ProcessLookupError:pass
+        p.wait();sel.close();pipe.close()
+    return entries,complete
+
 def snapshot():
     block=blocks();mounts=mount_rows();usage={};seen=set()
-    for mount in mounts:
+    # A drive's own mount (fsroot /) before its bind mounts, so usage is
+    # reported under /data and not under whichever bind came first.
+    for mount in sorted(mounts,key=lambda m:m.get('fsroot')!='/'):
         if mount['fstype'] not in ('btrfs','ext4','xfs') or not mount['source'].startswith('/dev/'):continue
         try:
             p=probe(mount['target'],block,mounts,resolve=False)
             if not p['supported'] or mount['majorMinor'] in seen:continue
-            seen.add(mount['majorMinor']);s=os.statvfs(mount['target'])
+            seen.add(mount['majorMinor']);s=os.statvfs(mount['target']);st=os.stat(mount['target'])
             total=s.f_blocks*s.f_frsize;free=s.f_bavail*s.f_frsize
-            usage[mount['target']]={'target':mount['target'],'total':total,'used':total-free,'free':free,'percent':round(100*(total-free)/total) if total else 0}
+            usage[mount['target']]={'target':mount['target'],'total':total,'used':total-free,'free':free,'percent':round(100*(total-free)/total) if total else 0,
+                # The helper only moves folders onto a mount that no user can rename things in.
+                'rootOwned':st.st_uid==0 and not st.st_mode&0o022}
         except OSError:continue
     root=probe('/',block,mounts,resolve=False)
     disks=classify(block,mounts,usage);io=diskstats()
-    for d in disks:d['io']=io.get(d['name'])
+    for d in disks:d['io']=io.get(d['name']);d['bootUnlock']=boot_unlock(d['mapper'])
     import time
     return {'disks':disks,'mounts':mounts,'rootEncrypted':root.get('encrypted',False),'sampledAt':int(time.monotonic()*1000)}

@@ -94,3 +94,36 @@ test('folder arrows line up and move headers read cleanly',()=>{const m=model(),
   const plan={id:'p',source:'/home/z/Pics',destMount:'/data',state:'awaiting-maintenance',stats:{bytes:2048,files:1200}};
   assert.equal(m.moveMeta(plan,null),'Ready to move · to /data');assert.equal(m.moveFacts(plan,snap()),'2 K · 1,200 files · 700 B free on /data');assert.equal(m.moveFacts(mv,snap()),'');
   assert.equal(m.dataTotal(snap()),'3.6 T');});
+const J=x=>JSON.parse(JSON.stringify(x));
+// ---- hand-made setups, what takes space, apps ----
+function manual(){return {mounts:[{target:'/',source:'/dev/mapper/root'}],apps:{steam:'/home/u/.local/share/Steam/steamapps',docker:true},
+  disks:[{id:'os',model:'Lexar NQ790',system:true,encrypted:true,size:1e12,mounts:[{target:'/',source:'/dev/mapper/root',fsroot:'/@'}],usage:[{target:'/',total:1000,used:700,free:300}]},
+   {id:'bulk',model:'Lexar NM990',system:false,encrypted:true,size:4e12,bootUnlock:'keyfile',mapper:'bulk',
+    mounts:[{target:'/data',source:'/dev/mapper/bulk',fsroot:'/',fstype:'btrfs',options:'rw'},{target:'/home/u/Projects',source:'/dev/mapper/bulk',fsroot:'/Projects'},
+            {target:'/var/lib/docker',source:'/dev/mapper/bulk',fsroot:'/docker'},{target:'/var/lib/docker/overlay2/x/merged',source:'/dev/mapper/bulk',fsroot:'/docker/overlay2/x'},
+            {target:'/data/docker/overlay2/x/merged',source:'/dev/mapper/bulk',fsroot:'/docker/overlay2/x'}],
+    usage:[{target:'/data',total:1000,used:200,free:800,rootOwned:false}]}],drives:[],moves:[]};}
+test('a drive set up by hand shows how it unlocks and the folders bound from it',()=>{const m=model(),s=manual();
+  s.mounts=s.mounts.concat(s.disks[1].mounts);
+  const r=m.dataDrives(s)[0];assert.equal(r.pill,'unlocks with OS');assert.equal(r.manual,true);assert.match(r.sub,/set up by hand/);
+  assert.deepEqual(J(r.folders.map(f=>[f.source,f.from])),[['/var/lib/docker','/data/docker'],['/home/u/Projects','/data/Projects']]);
+  assert.equal(m.dataDrives({...s,disks:[s.disks[0],{...s.disks[1],bootUnlock:''}]})[0].pill,'opened by hand');
+  const rows=m.manualFolderRows(s);assert.deepEqual(J(rows.map(r=>r.path)),['/home/u/Projects']);assert.equal(rows[0].label,'~/Projects → /data/Projects');
+  const apps=m.appRows(s);assert.deepEqual(J(apps.map(a=>[a.id,a.status,a.movable])),[['steam','on the OS disk',true],['docker','● on /data',false]]);});
+test('a hand-made drive is a move target only when it unlocks with a keyfile and its mount is root-owned',()=>{const m=model(),s=manual();
+  assert.equal(m.moveTargets(s).length,0);assert.match(m.blockedTargets(s)[0].issue,/chown root:root \/data/);
+  s.disks[1].usage[0].rootOwned=true;assert.deepEqual(J(m.moveTargets(s).map(t=>t.mountpoint)),['/data']);
+  s.disks[1].bootUnlock='prompt';assert.equal(m.moveTargets(s).length,0);assert.match(m.blockedTargets(s)[0].issue,/keyfile/);});
+test('sizes stream in line by line and fill the OS disk breakdown biggest first',()=>{const m=model();let z=m.emptySizes(true);
+  for(const l of ['{"steam":"/home/u/.local/share/Steam/steamapps","home":"/home/u"}','not json','{"kind":"entry","path":"/home/u/Videos","bytes":300}',
+    '{"kind":"entry","path":"/home/u/.cache","bytes":100}','{"kind":"entry","path":"/home/u/.local","bytes":200}','{"kind":"home","path":"/home/u","bytes":650}',
+    '{"kind":"extra","path":"/home/u/.local/share/Steam/steamapps","bytes":150}','{"done":true,"complete":true}'])z=m.addSizeLine(z,l);
+  const s=m.withSizes(manual(),z);const rows=m.spaceRows(s);
+  assert.deepEqual(J(rows.map(r=>[r.title,r.movable])),[['~/Videos',true],['~/.local',false],['~/.cache',false],['System, apps & snapshots',false]]);
+  assert.match(rows[1].why,/Steam/);assert.equal(rows[3].bytes,50);
+  assert.equal(m.appRows(s)[0].size,'150 B');assert.equal(m.systemSegments(s).length,3);
+  assert.equal(m.moveBlocker('/home/u/.ssh/x'),'app profile or settings · stays on the OS disk');assert.equal(m.moveBlocker('/var/lib/docker'),'outside your home folder');});
+test('the panel protected list matches the helper',()=>{const m=model();const py=fs.readFileSync(path.join(__dirname,'../helper/moves.py'),'utf8');
+  const set=py.match(/^PROTECTED=\{([^}]*)\}/m)[1].split(',').map(x=>x.trim().replace(/^'|'$/g,''));assert.deepEqual([...m.PROTECTED].sort(),set.sort());});
+test('OS disk is the first stop on the overview and opens the space view',()=>{const qml=fs.readFileSync(path.join(__dirname,'../Panel.qml'),'utf8');
+  assert.match(qml,/if \(sysRow\) out.push\(\{kind: "sys"/);assert.match(qml,/onChosen: root.openSystem\(\)/);});

@@ -53,6 +53,40 @@ Item {
         var next=pending;pending=null;
         if(next) Qt.callLater(function(){root.submit(next);});
     }
+    // ---- folder sizes (read-only du, as this user, streamed line by line) ----
+    // Measuring a full home folder can take a minute or two, so it runs in its
+    // own process, never blocks status polling, and is kept for 10 minutes.
+    property var sizes: Model.emptySizes()
+    property bool sizing: sizer.running
+    property real sizedAt: 0
+    property var sizeRequest: ({op: "sizes", paths: []})
+    property var queuedPaths: null
+    // A new set of folders to measure (e.g. the drive list just loaded)
+    // rescans; the same set within 10 minutes reuses the last result.
+    function scanSizes(paths, force) {
+        paths = (paths || []).slice(0, 16);
+        var same = JSON.stringify(paths) === JSON.stringify(sizeRequest.paths);
+        if (sizer.running) { if (!same || force) queuedPaths = paths; return; }
+        if (!force && same && sizedAt > 0 && Date.now() - sizedAt < 600000 && sizes.done) return;
+        sizeRequest = {op: "sizes", paths: paths};
+        sizes = Model.emptySizes(true);
+        sizer.command = Model.boundedArgv(["/usr/bin/python3", "-B", bridgePath, "--sizes"]);
+        sizer.stdinEnabled = true; sizer.running = true;
+    }
+    Process {
+        id: sizer
+        stdinEnabled: true
+        stdout: SplitParser { onRead: function(line) { root.sizes = Model.addSizeLine(root.sizes, line); } }
+        onStarted: { sizer.write(JSON.stringify(root.sizeRequest) + "\n"); sizer.stdinEnabled = false; }
+        onExited: function(code, status) {
+            if (!root.sizes.done) root.sizes = Model.addSizeLine(root.sizes, JSON.stringify({done: true, complete: false}));
+            root.sizedAt = Date.now();
+            var next = root.queuedPaths; root.queuedPaths = null;
+            if (next !== null && root.opened) Qt.callLater(function() { root.scanSizes(next, true); });
+        }
+    }
+    Timer { interval: 170000; running: sizer.running; onTriggered: if (sizer.running) sizer.signal(15); }
+
     function launch(args) {
         launching();
         Quickshell.execDetached(["/usr/bin/python3","-B",agentPath].concat(args));

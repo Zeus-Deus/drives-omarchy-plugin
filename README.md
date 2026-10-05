@@ -10,6 +10,11 @@ A bar widget and panel for encrypted data drives on Omarchy Quattro.
 - Undo a move, or delete the old copy once you are happy.
 - Recover after a reinstall (recovery passphrase) or when a drive was
   unplugged (reconnect).
+- See what fills your OS disk, biggest folders first, and move one from there.
+- Drives and bind mounts you set up yourself are recognised and shown (how
+  the drive unlocks, which folders are bound from it), never changed.
+- Apps: shows where Steam's game library and Docker's data live, and offers
+  to move Steam's library onto a drive.
 
 ## How moves work
 

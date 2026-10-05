@@ -25,10 +25,10 @@ omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml
 ```
 
-Current results (VM, 2026-10-05): 133 Python passed as root; the 9 native GTK
+Current results (VM, 2026-10-05): 142 Python passed as root; the 9 native GTK
 window tests skip there and pass separately as the desktop user with
 `DRIVES_GTK_TEST=1 WAYLAND_DISPLAY=wayland-1 python3 -m pytest
-tests/test_agent_gtk.py` (9 passed). 40 Node passed, plugin validates.
+tests/test_agent_gtk.py` (9 passed). 45 Node passed, plugin validates.
 qmllint has no errors; the remaining warnings are the kit's usual
 `Style.font.*`/`Color.*` missing-property noise and the `onExited`
 signal-parameter type.
