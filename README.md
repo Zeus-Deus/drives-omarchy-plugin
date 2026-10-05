@@ -29,17 +29,21 @@ folder. The panel says why instead of skipping anything.
 
 ## Install
 
-1. Add the plugin: `omarchy plugin add <repo> --yes --enable`, then put
-   **Drives** on your bar in Setup → Plugins.
-2. Without the helper the panel is a read-only overview. To set up drives and
-   move folders, install the root helper explicitly:
+Two commands on Omarchy Quattro:
 
-   ```sh
-   sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh
-   ```
+```sh
+omarchy plugin add https://github.com/Zeus-Deus/drives-omarchy-plugin.git --enable --yes
+sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh
+```
 
-   It needs `cryptsetup rsync btrfs-progs python-gobject gtk4`. Install
-   `smartmontools` for drive health.
+The first adds **Drives** to your bar. On its own it is a read-only overview.
+The second installs the small root helper that sets up drives and moves
+folders; read it first if you like, it is short. Everything it needs
+(`cryptsetup`, `rsync`, `btrfs-progs`, `python-gobject`, `gtk4`,
+`smartmontools`) is already part of a standard Omarchy install.
+
+Update later with `omarchy plugin update io.github.zeus-deus.drives`, then run
+the same `install.sh` again to refresh the helper.
 
 Every write action asks for your administrator password through Omarchy's
 polkit prompt. The recovery passphrase is entered in a separate small window,
