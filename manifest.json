@@ -5,7 +5,7 @@
   "version":"0.1.0",
   "author":"Zeus-Deus",
   "license":"MIT",
-  "description":"Encrypted-drive overview and guarded folder moves with inspect-only recovery",
+  "description":"Encrypted data drives: overview, health, setup, and folder moves that keep their path",
   "kinds":["bar-widget"],
   "entryPoints":{"barWidget":"Panel.qml"},
   "barWidget":{

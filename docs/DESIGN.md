@@ -1,114 +1,124 @@
-# Drives build contract
+# Drives: design
 
-Plugin ID `io.github.zeus-deus.drives`. Native Omarchy Quattro bar + KeyboardPanel; no root, sudo, pkexec or secret fields in QML. Persist source here; execute tests/build/install in session-owned Omarchy VM only. No automatic privileged install hooks. State is root-owned `/var/lib/drives-helper/{moves,drives}`. Product must refuse auto-unlock key storage on unencrypted root; test-only override is root-owned service environment, never a D-Bus parameter.
+Plugin ID `io.github.zeus-deus.drives`. A native Omarchy Quattro bar widget and
+KeyboardPanel, plus a separate root storage helper. QML holds no privilege and
+never sees a secret: no sudo, pkexec, polkit rule or password field in QML.
 
-## Correcting the proposal
-Polkit grants authorization, not LUKS secret input. A separate unprivileged GTK4 `helper/agent.py` collects recovery secrets in a password field, seals a memfd (all write/resize seals) and passes its FD via D-Bus UnixFDList. QML receives no secret. Recovery uses the same agent and udisks2 Encrypted.Unlock. No secrets in argv, environment, disk fixtures, D-Bus string args or logs. A disposable test-generated passphrase may be sent through an anonymous pipe/memfd by E2E, never printed.
+## Pieces
 
-## Read-only bridge
-`/usr/bin/python3 bridge.py` takes one bounded JSON request on stdin, emits one bounded JSON response, no stderr secrets. Requests: `{op:"status"}`, `{op:"probe",path:...}`, `{op:"start_move",src:...,destMount:...}`, `{op:"resume_move"|"rollback_move"|"delete_old_copy"|"cancel_move"|"restart_move",id:...}`. Writes use helper.client. `{ok:true,...}` or `{ok:false,error:...}`. Status fields: `disks` (id/byId,name,model,serial,size,system,encrypted,mounts,state,selectable), `mounts` (target,source,fsroot,fstype,options), `moves`, `drives`, `helperAvailable`, `rootEncrypted`, `error`. Display sanitization strips controls/bidi/newline, but raw identifiers stay byte-exact internally. Read mountinfo first; never stat autofs paths. Resolve inverse lsblk chains, fail closed for unsupported multi-device/LVM/md/loop/network topologies. Poll 1 second while open; zero background shell polling when closed. Cap command output at ingestion, deadlines cover worst-case commands.
+| Part | Runs as | Does |
+|---|---|---|
+| `Panel.qml`, `Service.qml`, `Model.js` | user, inside omarchy-shell | Overview, wizards, move rows. All decisions about wording and offered actions live in `Model.js` (Node-tested). |
+| `bridge.py`, `topology.py` | user | One bounded JSON request → one response. Read-only topology from `/proc/1/mountinfo`, `lsblk`, `statvfs`, `/proc/diskstats`; writes go to the helper over D-Bus. |
+| `helper/agent.py` | user | Separate GTK4 window for the recovery passphrase. Seals it in a memfd and passes the FD over D-Bus. |
+| `helper/service.py` (`drives-helper.service`) | root, `ProtectSystem=strict` | System D-Bus helper. One polkit `auth_admin` action per write. Re-derives every precondition itself. |
+| `helper/offline.py` (`drives-maintenance-worker.service`) | root, maintenance boot only | Performs folder moves and Undo while nothing else is running. |
 
-## System D-Bus
-Bus `io.github.zeus_deus.Drives`, object `/io/github/zeus_deus/Drives`, interface same as bus.
-Read: `Status() -> s` JSON `{moves:[],drives:[],version:"0.1.0"}`; no auth.
-Writes authorize caller unique bus name against polkit with `AllowUserInteraction`, per-op `io.github.zeus-deus.drives.<action>` and auth_admin (not keep). Re-derive every condition; never trust panel booleans. Fail closed on missing auth, malformed JSON, unknown fields and secrets passed by string. Methods:
-- `ProvisionDrive(s request,h secretFd) -> s`: request keys `byId,serial,name,mountpoint,erase,confirmation,autoUnlock`; schedule background provisioning and return `{ok:true,id:...}`. Secret FD must be sealed memfd bounded 8..4096 bytes. Serial identity and fragment confirmation checked again in helper; system/mounted disks excluded. Provision via udisks for supported format/config operations, preserve own journalling around each irreversible step. `helper/provisioning.py`: `provision(request,secret,common)` and `inspect(common)`; common provides `run`, `journal`, `state_dir`, `boot_id`. Interface integration may adapt explicitly in this document before merging.
-- `StartMove(s src,s destMount) -> s` schedules and returns `{ok:true,id:...}`.
-- `ResumeMove(s id)`, `RollbackMove(s id)`, `DeleteOldCopy(s id)`, `CancelMove(s id)`, `RestartMove(s id)` -> s.
-- `ExportHeaderBackup(s name,s destination) -> s` requires separate auth, safe absolute regular-file destination, refuses overwrites/symlinks.
+## Status (read, no auth)
 
-`helper/client.py`: functions `status()` and `call(method,args,secret_fd=None)` return decoded JSON; lazy GI imports. `helper/agent.py` CLI `provision --by-id <...> --serial <...> --name <...> --mountpoint <...> --confirmation <...> [--erase] [--manual]` shows actual model/serial, secret + confirmation fields only in GTK; never root. `unlock --device <udisks-object-path>` uses udisks with entered secret. QML closes before launching external window. `helper/install.sh` explicitly user-invoked privileged deployment; dependencies and uninstall documented, no side effects when imported.
+`Status()` returns moves, drives, jobs, `restartPending`, `health` and
+`testFixtureMode`. The bridge adds disks (id, byId, model, serial, size, system,
+encrypted, mounts, state, selectable, usage, `io` byte counters), mounts,
+`rootEncrypted` and `sampledAt`. The panel polls once a second while open and
+not at all while closed.
 
-## Moves
-`helper/moves.py`: `MoveManager(common)` with methods `start(src,destMount)`, `resume(id)`, `rollback(id)`, `delete_old(id)`, `cancel(id)`, `restart(id)`, `inspect()`; operations return dict. Caller authorization is service responsibility; manager independently validates paths, mount topology, UID/protected paths, open FDs, unreadable ownership subtrees, nested mounts, encrypted destination with >=1.2x source size, target unique. Deny profiles/credentials/databases/system paths and symlinked ancestors. ACL/hardlink/xattr/sparse/odd-byte fidelity uses rsync -aHAXS --numeric-ids. Verify checksum dry run + metadata and counts, no silent skip. Git worktree references must remain valid through the unchanged source bind path or be safely repaired. Never execute arbitrary consuming-app shell command from caller.
+`health` is a SMART verdict per serial (`passed`, `warning`, `failing`,
+`unavailable` with a reason). The helper runs `smartctl` in the background
+with a 10-minute cache, so Status never waits on it. USB bridges and virtual
+disks report `unavailable`, never a guessed "healthy".
 
-The legacy live-copy/cutover procedure is disabled: new normal-session moves journal `awaiting-maintenance` with the original still in use and `verified=false`. Legacy live verification never authorizes cleanup, even after a reboot. Interrupted legacy switches keep both copies and require explicit maintenance inspection; no journal is silently upgraded. Protocol 2 is reserved for the new offline/quarantine implementation and is currently refused, not treated as qualified functionality. Cancel/Start over additionally require a pre-switch phase, an unchanged original, no saved cutover/placeholder/verification and no active bind: a missing backup alone never makes the destination disposable. Legacy normal-session Undo is disabled as well; it retains both copies for maintenance inspection. The internal quarantine primitives now reject outside regular-file and symlink hardlinks, prepare a durable root-private store on the same filesystem/subvolume, and rename the original without replacing any existing entry while preserving inode/owner/mode/mtime. They do not authorize exclusion, run automatically, or provide a public cutover path. Final offline copy, bind activation, rollback and cleanup must obey the maintenance contract below. Journals remain fsync + atomic rename + directory fsync before actions; startup inspects only. Keep source, destination, parent and quarantine filesystem/subvolume/inode identities plus a cutover boot ID and saved verification. Post-switch rollback must refuse destination divergence rather than discard new files; cleanup never promises reclaimed space if snapshots retain old data.
+## Writes (system D-Bus `io.github.zeus_deus.Drives`)
 
-## Maintenance-mode migration (approved scope revision)
+| Method | Polkit action | Notes |
+|---|---|---|
+| `ProvisionDrive(s request, h secretFd)` | `provision` | LUKS2 + keyfile + recovery keyslot, Btrfs on the mapper, crypttab/fstab, header backup. Typed serial fragment checked again in the helper. |
+| `ResumeDrive(s id)` | `resume-drive` | Finish an interrupted setup; never formats again. |
+| `UnlockDrive(s id, h secretFd)` | `unlock` | Recovery passphrase → opens under the configured mapper name, mounts the configured path, reconnects moved folders. |
+| `ReconnectDrive(s id)` | `reconnect` | Drive plugged back in after boot: starts its own `systemd-cryptsetup@` unit (keyfile), mounts it, reconnects moved folders. |
+| `StartMove(s src, s destMount)` | `move` | Plans only. Creates the move's private folder on the drive and journals `awaiting-maintenance`. |
+| `ResumeMove(s id)` / `RollbackMove(s id)` | `resume` / `rollback` | Arm the next-boot request for Continue / Undo. |
+| `CancelRestart(s id)` | `resume` | Withdraw this session's own request. |
+| `CancelMove(s id)` / `RestartMove(s id)` | `cancel` / `restart` | Discard the planned destination (pre-switch only). |
+| `DeleteOldCopy(s id)` | `delete` | Only after a verified move has survived one normal restart with its bind active. |
+| `ExportHeaderBackup(s name, s destination)` | `export` | Copies the LUKS header backup to a path in the caller's home. |
 
-The ordinary helper now acquires a root-private, no-follow, nonblocking flock
-on `/var/lib/drives-helper/storage.lock` before persisting a job. It retains
-that lease through terminal job persistence, and releases both the shared lease
-and the in-process admission lock on persistence or thread-start failure.
-Any persistent latch or runtime maintenance entry (including malformed,
-directory or dangling entries) refuses ordinary mutations before job creation.
-Independent-process tests and repeated installed D-Bus refusal/recovery have
-passed. This serializes the ordinary scheduler; it does not yet qualify an
-offline worker, storage admission, or detached storage/config workers.
+Secrets only ever arrive as a sealed memfd (8–4096 bytes). Never in argv, the
+environment, D-Bus strings or logs.
 
-Ordinary-folder cutover requires explicit downtime. A live copy is only a seed;
-it never authorizes activation or cleanup. Normal-session StartMove prepares a
-journal and returns `awaiting-maintenance`, without renaming the live source.
-An independently authorized maintenance request selects the pending journal;
-users save work and reboot deliberately. The plugin never silently logs out,
-kills applications, or isolates a live desktop target.
+### Namespace rule
 
-A root-owned early systemd generator reads the root-filesystem latch
-`/drives-maintenance-request.json` and selects the dedicated maintenance target
-before the graphical target, user managers, timers, containers or ordinary
-writer services can start. Inaccessible/missing `/var` journals must never hide
-a root boot latch: hold the gate closed and require administrative inspection.
-The gate survives reboot until explicitly released.
-Boot performs inspection only: no copy, resume, rollback or cleanup is automatic.
-The maintenance console requires a separate explicit action for Continue/Undo.
-The helper must verify the boot receipt, selected journal, minimal service
-allowlist, absence of user sessions/writers, and current storage identity.
-Open-descriptor/mapping scans are additional diagnostics, not writer exclusion.
+The helper never lists a drive mountpoint in `ReadWritePaths`. When a drive is
+locked its automount cannot be bind-mounted into the namespace, and the helper
+would fail to start (226/NAMESPACE) exactly when recovery is needed. Every
+write to a drive runs in a fixed transient worker that can write only there:
+`helper/destination.py` (create/discard a move's folder; re-checks the
+recorded identity before deleting), `helper/mountproof.py`. Config edits go
+through `helper/configwriter.py`, the root latch through `helper/latch.py`,
+udev rules through `helper/udevhide.py`.
 
-Current implementation adds an explicitly started, read-only
-`drives-maintenance-audit.service` (no boot enablement). It checks the selected
-root-private latch/receipt against the current boot, actual target dependencies
-and masks, pending systemd jobs, services/sockets/timers/paths, session records,
-and process UID/executable/cgroup identity. Its observation is not a maintained
-writer lease and is not connected to migration. The installed service refuses
-an ordinary guest boot without changing fstab/crypttab, the helper PID or the
-running desktop. A guest cold-boot test of the installed service also accepts
-an inspect-only maintenance snapshot. A dedicated, bounded
-`drives-maintenance-splash.service` quits and waits for the initramfs boot screen
-before the minimal target; it does not pull normal boot targets or admit a
-residual/deleted Plymouth executable. The test uses a QA-only boot trigger and
-UART reporting/recovery, preserves the source and journal, and does not grant a
-writer lease. Current packaging also installs a standalone normal-boot guard
-and persistent `sysinit.target` Requires/After drop-in. It checks only the
-presence of root latch/runtime controls (including malformed/dangling entries),
-without helper imports or journal parsing. Missing guard program or generator
-must retain the normal-boot failure barrier. This is a once-per-normal-boot
-check, never a way to isolate an already-running session or establish a writer
-lease. Maintained activation exclusion, storage admission and the actual offline
-worker remain unqualified. Earlier inspect-only target probes alone do not
-qualify the audit. The generator now emits type-wide activation conditions for
-service/socket/timer/path/mount/automount/swap/scope units and exact-name
-exemptions for the minimal audit closure. Current-boot runtime guards survive
-daemon-reload even after persistent latch release. A real synthetic-journal
-cold boot blocked direct and late services, socket, timer and path activations,
-including after reload and release, and returned a matching UART recovery ACK.
-Transient activation could not reach the absent system bus; that is not proof
-that a transient-unit condition ran. Mount/automount/swap/scope and selected
-storage admission remain unqualified. The guest later required resuming its
-preserved VM disk before ordinary-boot cleanup could be verified, so this run
-does not establish clean unattended recovery or production migration.
-The explicit uninstaller refuses any root latch or maintenance runtime entry
-(even empty, malformed or dangling), and any maintenance target state other than inactive. It checks
-again after stopping the ordinary helper, before disabling it or removing the
-recovery units/generator. A refused late request can leave the helper stopped,
-with its enabled unit and recovery files retained. Quiet uninstall removes only
-owned infrastructure; journals, keys and storage configuration remain. This is
-not a mechanism for releasing a maintenance gate or establishing exclusion.
+### Desktop automount
 
-Under exclusion, the source moves to a same-filesystem root-private quarantine
-with stable root-controlled ancestry. Reject external hardlinks (including
-hardlinked symlinks), nested mounts and unsupported fidelity. Copy/reconcile and
-fully verify the quarantined original before exposing the destination. Save the
-post-exclusion verification, fsync destination data/metadata, then activate and
-verify the bind. Keep quarantine inaccessible through normal boot until a
-separately confirmed cleanup after reboot. Ambiguous crash recovery keeps the
-gate closed and both copies retained. Rollback requires exclusion and refuses
-post-cutover destination divergence. No containing-home snapshot may silently
-include unrelated profiles or credentials.
+Omarchy autostarts `udiskie`, which would pop a generic "Enter password for
+/dev/sdX1" dialog for a locked Drives volume and open it under the wrong name.
+Every Drives volume gets `/etc/udev/rules.d/90-drives-<name>.rules` setting
+`UDISKS_IGNORE=1` (on setup, on recovery unlock, and for existing drives when
+the helper is reinstalled).
 
-Maintenance support is not qualified until real guest boot exclusion, explicit
-recovery, late-write preservation and the revised crash matrix pass. The prior
-normal-session migration proof does not establish this stronger contract.
+## Moving a folder (protocol 2)
 
-## Tests/evidence
-Strict vertical TDD; RED then GREEN logs. All executable gates inside VM with boot identity recorded. Evidence directory is managed session artifact dir (provided by parent). All root storage operations only guest; QMP attachment/reset approved only for own VM. Tests cannot introduce production auth bypasses. Read-only tests no polkit; privileged VM fixture setup may use guest sudo, but real E2E must additionally verify D-Bus auth behavior and GTK handoff. Report unavailable encrypted-OS qualification separately (stock Realm OS root is plaintext Btrfs). No publication without explicit request. Commit only own files, no AI author attribution; parent owns integration commits.
+1. **Plan (normal session).** Preflight refuses: profiles, credentials and
+   databases (deny list), unreadable subtrees, open files (lists the
+   processes, never kills them), FIFOs/sockets/devices, nested mounts, files
+   hardlinked from outside the folder, a destination that is not one
+   encrypted keyfile drive, and less than 1.2× the folder size free.
+2. **Request.** "Move on next restart" writes the root-only latch
+   `/drives-maintenance-request.json`. "Restart now" runs Omarchy's normal
+   `omarchy-system-reboot`.
+3. **Maintenance boot.** An early generator selects
+   `drives-maintenance.target`: no desktop, no user sessions, no timers. A
+   sysinit guard keeps a normal boot from starting while the latch exists.
+4. **Worker.** Re-audits the boot (target active, masks, no sessions, jobs or
+   unexpected processes), then: quarantine the original in a root-private
+   store on the same filesystem → `rsync -aHAXS --numeric-ids` → full
+   checksum + metadata + count verification → immutable empty placeholder at
+   the old path → fstab bind (`bind,nofail,x-systemd.requires=<drive>`) →
+   read/write proof → reboot.
+5. **After.** The familiar path opens the drive. The original stays in
+   quarantine. Undo and Delete old copy are offered from the panel.
+
+**Undo** runs in the same kind of boot. It is refused if anything changed
+after the move (rsync itemize; directory-timestamp-only changes ignored), so
+new work is never lost.
+
+**Interruptions.** An interrupted Continue puts the untouched original back
+and pauses the move; it never resumes copying on its own. An interrupted Undo
+finishes restoring. Anything ambiguous keeps both copies, marks the move
+"Needs attention" and boots normally rather than stranding the user at a
+blank screen. A request that cannot run (drive unplugged, audit refused)
+changes nothing and is cleared.
+
+Journal states: `planned`, `awaiting-maintenance`, `quarantining`, `copying`,
+`verifying`, `switching`, `switched`, `rebooted`, `rolling-back`, `cleaning`,
+`cleaned`, `rolled-back`, `paused`. Every state is fsync'd (file, rename,
+directory) before acting. The maintenance log is
+`/var/lib/drives-helper/maintenance.log`, because the maintenance boot's
+journal is volatile.
+
+## Missing, locked and re-plugged drives
+
+The configured-drive row tells the user what to do:
+
+- **Missing**: plug it back in. Moved folders stay mode-000 placeholders, so
+  nothing is written to the OS disk.
+- **Connected but not in use** (plugged in after boot, or binds down):
+  *Reconnect drive* (keyfile, no passphrase).
+- **Key missing on this computer** (reinstall, new machine): *Unlock with
+  recovery passphrase…* opens the GTK agent.
+
+## Not done (by design or not yet)
+
+- Manual-unlock ("ask every time") drives cannot be move destinations: the
+  maintenance boot has no prompt.
+- TPM2 unlock is not offered.
+- Folder sizes in the breakdown are the apparent size recorded at move time,
+  not a live `btrfs filesystem du`.
