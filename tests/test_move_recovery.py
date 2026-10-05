@@ -57,3 +57,16 @@ def test_walk_error_is_not_a_silent_skip(tmp_path,monkeypatch):
         return iter(())
     monkeypatch.setattr(moves.os,'walk',broken)
     with pytest.raises(Failure,match='unreadable subtree'):tree_stats(str(tmp_path))
+
+
+def test_hardlink_to_outside_the_folder_is_refused(tmp_path):
+    import os
+    outside=tmp_path/'outside.txt';outside.write_text('shared')
+    folder=tmp_path/'Docs';folder.mkdir();os.link(outside,folder/'inside.txt')
+    with pytest.raises(Failure,match='hardlink'):tree_stats(str(folder))
+
+
+def test_hardlinks_wholly_inside_the_folder_are_fine(tmp_path):
+    import os
+    folder=tmp_path/'Docs';folder.mkdir();(folder/'a').write_text('x');os.link(folder/'a',folder/'b')
+    assert tree_stats(str(folder))['files']==2

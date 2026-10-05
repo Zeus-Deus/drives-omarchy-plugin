@@ -99,6 +99,7 @@ def tree_stats(path,uid=None):
     if uid is not None:
         user=pwd.getpwuid(uid);groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
     def unreadable(exc):raise Failure('unreadable subtree; refusing a silent skip') from exc
+    links={}  # (dev, ino) -> [link count, names seen inside this tree]
     # Sort within each directory, not one million entries in memory.
     for root,dirs,files in os.walk(path,topdown=True,followlinks=False,onerror=unreadable):
         if any(name.lower() in PROTECTED for name in dirs):raise Failure('protected subtree: profiles, credentials or databases cannot move')
@@ -111,7 +112,11 @@ def tree_stats(path,uid=None):
                 if permission&need!=need:raise Failure('unreadable subtree: close its owner and fix permissions before moving')
             if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Failure('special file refused (socket, FIFO or device)')
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
+            if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0])[1]+=1
             h.update(len(rel).to_bytes(4,'big'));h.update(rel);h.update(str((s.st_mode,s.st_uid,s.st_gid,s.st_size)).encode())
+    # A hardlink to a file outside the folder would silently become two
+    # separate files after the move; refuse instead of splitting it.
+    if any(seen<total for total,seen in links.values()):raise Failure('a file here is also linked from outside this folder (hardlink); moving it would split the two names')
     return {'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
 
 class MoveManager:
