@@ -47,9 +47,8 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
    <open|status|goto|selectDisk|selectMove|moveAction|reconnect|...>`.
    `status` returns the snapshot, confirm-dialog state, rates, footer and
    bridge busy state.
-5. Reboots: the agent terminal cannot run `systemctl reboot`. Use the VM's own
-   QMP `system_reset` (keeps hot-plugged disks attached), or the panel's
-   "Restart now" button. `sync` first. A move needs about 150 s for the
+5. Reboots: from outside the guest, use the VM's own QMP `system_reset`
+   (keeps hot-plugged disks attached), or the panel's "Restart now" button. `sync` first. A move needs about 150 s for the
    maintenance boot plus its own reboot.
 6. Polkit: write actions need an admin password. For unattended GUI tests a
    VM-only `/etc/polkit-1/rules.d/00-drives-qa.rules` returning YES for
