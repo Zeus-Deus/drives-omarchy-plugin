@@ -140,7 +140,7 @@ BarWidget {
                     }
                     Text {
                         width:content.width;visible:root.storage.testFixtureMode===true
-                        text:"VM test fixture: OS root is plaintext. This does not prove encrypted-root key protection.";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                        text:"VM test fixture: the OS disk is not encrypted, so this does not prove the keyfile is protected.";color:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview"||root.view==="add"
@@ -161,12 +161,34 @@ BarWidget {
                                 }
                                 Repeater {
                                     model:(diskColumn.disk.usage||[]).length
-                                    Text {
+                                    Column {
+                                        id:usageColumn
                                         required property int index
                                         property var u:diskColumn.disk.usage[index]||({})
-                                        width:content.width;text:Model.display(u.target)+" · "+u.percent+"% used · "+Model.bytes(u.free)+" free"
-                                        font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;color:root.ink;textFormat:Text.PlainText
+                                        property var folders:Model.movedFolders(u.target,root.storage.moves||[])
+                                        width:content.width;spacing:0
+                                        Text {
+                                            width:content.width;text:Model.display(usageColumn.u.target)+" · "+usageColumn.u.percent+"% used · "+Model.bytes(usageColumn.u.free)+" free"
+                                            font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;color:usageColumn.u.percent>=90?Color.urgent:root.ink;textFormat:Text.PlainText
+                                        }
+                                        Repeater {
+                                            model:usageColumn.folders.length
+                                            Text {
+                                                required property int index
+                                                property var f:usageColumn.folders[index]||({})
+                                                width:content.width;leftPadding:Style.spacing.md;elide:Text.ElideMiddle
+                                                text:"↳ "+Model.display(f.source)+" · "+Model.bytes(f.bytes)+(f.bound?"":" · not reachable")
+                                                font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;color:f.bound?root.ink:Color.urgent;opacity:f.bound?0.75:1;textFormat:Text.PlainText
+                                            }
+                                        }
                                     }
+                                }
+                                Text {
+                                    readonly property var h:Model.health(diskColumn.disk,root.storage.health)
+                                    readonly property string io:Model.ioText(service.rates[diskColumn.disk.name])
+                                    width:content.width;visible:root.view==="overview";opacity:h.state==="failing"||h.state==="warning"?1:0.6
+                                    text:h.label+(io?" · "+io:"")
+                                    font.family:Style.font.family;font.pixelSize:Style.font.caption;color:h.state==="failing"||h.state==="warning"?Color.urgent:root.ink;elide:Text.ElideRight;textFormat:Text.PlainText
                                 }
                             }
                         }
@@ -189,6 +211,12 @@ BarWidget {
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="overview"
                         PanelSectionHeader {text:"MOVED FOLDERS & RECOVERY"}
+                        Text {
+                            readonly property real n:Model.reclaimable(root.storage.moves||[])
+                            visible:n>0;width:content.width
+                            text:Model.bytes(n)+" reclaimable on the OS disk (old copies kept for Undo)"
+                            color:root.ink;opacity:0.75;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                        }
                         Repeater {
                             id:moveRows;model:root.moves.length
                             Button {
@@ -223,7 +251,13 @@ BarWidget {
                     }
                     Column {
                         width:content.width;spacing:Style.spacing.sm;visible:root.view==="manage" && root.chosenDisk!==null
-                        Text {width:content.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · SMART: not checked":"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {width:content.width;text:root.chosenDisk?Model.display(root.chosenDisk.model)+" · serial "+Model.display(root.chosenDisk.serial)+"\n"+root.chosenDisk.state+" · "+Model.health(root.chosenDisk,root.storage.health).label:"";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                        Text {
+                            readonly property var h:root.chosenDisk?Model.health(root.chosenDisk,root.storage.health):({reason:"",state:""})
+                            width:content.width;visible:h.reason!=="";text:h.reason
+                            color:h.state==="failing"||h.state==="warning"?Color.urgent:root.ink;opacity:h.state==="unavailable"?0.7:1
+                            font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                        }
                         Text {width:content.width;visible:root.chosenDisk&&root.chosenDisk.state==="locked";text:"Disk is present but locked. Missing keyfile or a new OS? Use the recovery passphrase. No secret is entered in this panel.";color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                         Button {text:"Continue existing drive setup…";visible:root.chosenDisk && (root.storage.drives||[]).some(function(d){return d.serial===root.chosenDisk.serial && d.state!=="ready";});onClicked:{var ds=root.storage.drives||[];for(var i=0;i<ds.length;i++)if(ds[i].serial===root.chosenDisk.serial)service.submit({op:"resume_drive",id:ds[i].id});}}
                         Button {
@@ -262,7 +296,7 @@ BarWidget {
                         Repeater {model:(root.storage.drives||[]).length;Text{required property int index;width:content.width;text:Model.display(root.storage.drives[index].name)+" · "+root.storage.drives[index].state;color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.body;textFormat:Text.PlainText;}}
                     }
                     PanelSeparator {}
-                    Text {width:content.width;text:"j/k move · enter manage · a add · m move · r rescan · esc back/close";color:root.ink;opacity:0.6;font.family:Style.font.family;font.pixelSize:Style.font.caption;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
+                    Text {width:content.width;text:Model.footerHints(root.view);color:root.ink;opacity:0.6;font.family:Style.font.family;font.pixelSize:Style.font.caption;wrapMode:Text.WordWrap;textFormat:Text.PlainText}
                 }
             }
             ConfirmDialog {
@@ -276,7 +310,7 @@ BarWidget {
     }
     IpcHandler {
         target:"drives"
-        function status():string{return JSON.stringify({opened:root.opened,view:root.view,cursor:root.cursor,contentY:flick.contentY,confirmOpen:confirm.opened,confirmSelection:confirm.selectedIndex,snapshot:root.storage,error:service.error});}
+        function status():string{return JSON.stringify({opened:root.opened,view:root.view,cursor:root.cursor,contentY:flick.contentY,confirmOpen:confirm.opened,confirmSelection:confirm.selectedIndex,snapshot:root.storage,rates:service.rates,footer:Model.footerHints(root.view),error:service.error});}
         function open():void{root.open();}
         function close():void{root.close();}
         function refresh():void{service.refresh();}

@@ -31,6 +31,8 @@ def read_secret_fd(fd):
 class Server:
     def __init__(self,common=None):
         self.c=common or Common();self.worker_lock=threading.Lock();self.draining=False;self.connection=None
+        from helper.health import HealthCache,present_disks
+        self.health=HealthCache(present_disks)
         self.jobs=sorted(self.c.records('jobs'),key=lambda j:j['started'])[-24:]
         for job in self.jobs:
             if job['state']=='running':job['state']='paused';job['error']='Interrupted helper job; inspect before explicitly continuing.'
@@ -51,7 +53,7 @@ class Server:
             for m in moves:
                 if m.get('updated',0)>=running['started'] and m.get('interruptedState') in ACTIVE:
                     m['state']=m['interruptedState'];m['error']=''
-        return {'ok':True,'version':'0.2.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
+        return {'ok':True,'version':'0.2.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')

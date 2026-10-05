@@ -10,7 +10,7 @@ def handle(req):
         result=snapshot();result.update(ok=True,helperAvailable=False,moves=[],drives=[],jobs=[])
         try:
             from helper.client import status
-            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','testFixtureMode','restartPending')});result['helperAvailable']=h.get('ok',False)
+            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','testFixtureMode','restartPending','health')});result['helperAvailable']=h.get('ok',False)
         except Exception:result['helperError']='Storage helper is not installed or unavailable. The overview remains read-only.'
         result['agentAvailable']=pathlib.Path(__file__).with_name('helper').joinpath('agent.py').exists()
         # Do not expose unrelated pseudo-filesystems to QML.

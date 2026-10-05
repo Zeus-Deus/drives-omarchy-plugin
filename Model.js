@@ -88,8 +88,50 @@ function moveActions(move,pending) {
     if(pending && pending.moveId===move.id && pending.thisSession===false)a=a.filter(function(x){return x!=="cancel_restart";});
     return a;
 }
+// SMART verdict for a disk from the helper's cached health report.
+function health(disk,report) {
+    var all=(report&&report.disks)||{};
+    var h=all[disk.serial]||all["*"];
+    if(!h)return {state:"unknown",label:"Health: checking…",reason:""};
+    var label={passed:"Health: OK",warning:"Health: warning",failing:"Health: FAILING",unavailable:"Health: not available"}[h.state]||"Health: unknown";
+    if(h.temperature)label+=" · "+h.temperature+"°C";
+    return {state:h.state,label:label,reason:display(h.reason)};
+}
+// Read/write rates (bytes/s) per disk name from two status snapshots.
+function ioRates(prev,cur) {
+    var out={};
+    if(!prev||!cur||!prev.sampledAt||!cur.sampledAt)return out;
+    var dt=(cur.sampledAt-prev.sampledAt)/1000;
+    if(!(dt>0.2))return out;
+    var before={};(prev.disks||[]).forEach(function(d){if(d.io)before[d.name]=d.io;});
+    (cur.disks||[]).forEach(function(d){
+        var a=before[d.name],b=d.io;
+        if(a&&b&&b.read>=a.read&&b.written>=a.written)out[d.name]={read:(b.read-a.read)/dt,write:(b.written-a.written)/dt};
+    });
+    return out;
+}
+// Key hints for the current view; only keys that actually do something there.
+function footerHints(view) {
+    if(view==="overview")return "j/k move · enter open · a add drive · m move folder · r rescan · esc close";
+    return "esc back · r rescan";
+}
+function rate(n){return bytes(n)+"/s";}
+function ioText(r){return r?"Read "+rate(r.read)+" · Write "+rate(r.write):"";}
+// Folders moved onto a mounted drive, with their size when moved.
+// Sizes come from the move record (apparent bytes at move time), not a live du.
+function movedFolders(target,moves) {
+    return (moves||[]).filter(function(m){return m.destMount===target&&["switched","rebooted","cleaning","cleaned"].indexOf(m.state)>=0;})
+        .map(function(m){return {source:m.source,bytes:(m.stats&&m.stats.bytes)||0,bound:!!m.bound,oldCopy:m.state!=="cleaned"};});
+}
+// Old copies still kept on the OS disk (deleted only by an explicit step).
+function reclaimable(moves) {
+    var n=0;(moves||[]).forEach(function(m){if(m.state==="switched"||m.state==="rebooted")n+=(m.stats&&m.stats.bytes)||0;});
+    return n;
+}
 function warning(snapshot) {
     var ds=snapshot.drives||[],ms=snapshot.moves||[];
+    var disks=snapshot.disks||[];
+    for(var k=0;k<disks.length;k++){var h=health(disks[k],snapshot.health).state;if(h==="failing"||h==="warning")return true;}
     for(var i=0;i<ds.length;i++)if(configuredDriveState(ds[i],snapshot.disks||[])!=="Mounted")return true;
     for(var j=0;j<ms.length;j++){
         var stage=moveStage(ms[j],snapshot.restartPending);

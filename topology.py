@@ -77,6 +77,21 @@ def classify(block,mounts,usage):
             'smart':'not checked'})
     return out
 
+def diskstats(text=None):
+    """Cumulative bytes read/written per whole disk from /proc/diskstats.
+    Sector counts there are always 512-byte units, whatever the device."""
+    if text is None:
+        try:text=pathlib.Path('/proc/diskstats').read_text()
+        except OSError:return {}
+    out={}
+    for line in text.splitlines():
+        f=line.split()
+        # major minor name reads merged sectors-read ms writes merged sectors-written ...
+        if len(f)<10 or not re.fullmatch('[A-Za-z0-9._-]+',f[2]):continue
+        try:out['/dev/'+f[2]]={'read':int(f[5])*512,'written':int(f[9])*512}
+        except ValueError:continue
+    return out
+
 def snapshot():
     block=blocks();mounts=mount_rows();usage={};seen=set()
     for mount in mounts:
@@ -89,4 +104,7 @@ def snapshot():
             usage[mount['target']]={'target':mount['target'],'total':total,'used':total-free,'free':free,'percent':round(100*(total-free)/total) if total else 0}
         except OSError:continue
     root=probe('/',block,mounts,resolve=False)
-    return {'disks':classify(block,mounts,usage),'mounts':mounts,'rootEncrypted':root.get('encrypted',False)}
+    disks=classify(block,mounts,usage);io=diskstats()
+    for d in disks:d['io']=io.get(d['name'])
+    import time
+    return {'disks':disks,'mounts':mounts,'rootEncrypted':root.get('encrypted',False),'sampledAt':int(time.monotonic()*1000)}

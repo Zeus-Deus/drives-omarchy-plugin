@@ -14,6 +14,7 @@ Item {
     property var pending: null
     property var snapshot: ({disks:[],moves:[],drives:[],jobs:[],helperAvailable:false})
     property string error: ""
+    property var rates: ({})
     readonly property bool mutating: busy && request.op !== "status"
     readonly property string bridgePath: decodeURIComponent(Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//,""))
     readonly property string agentPath: decodeURIComponent(Qt.resolvedUrl("helper/agent.py").toString().replace(/^file:\/\//,""))
@@ -43,7 +44,7 @@ Item {
                 try {
                     var result = JSON.parse(output.text);
                     if (!result.ok) error = Model.display(result.error);
-                    else if (request.op === "status") { snapshot=result; loaded=true; }
+                    else if (request.op === "status") { rates=Model.ioRates(snapshot,result); snapshot=result; loaded=true; }
                     else { error=""; finished(result); }
                 } catch(e) { error="Invalid storage bridge response."; }
             }
