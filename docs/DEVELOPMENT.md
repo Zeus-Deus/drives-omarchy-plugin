@@ -28,7 +28,7 @@ omarchy plugin validate .
 Current results (VM, 2026-10-05): 133 Python passed as root; the 9 native GTK
 window tests skip there and pass separately as the desktop user with
 `DRIVES_GTK_TEST=1 WAYLAND_DISPLAY=wayland-1 python3 -m pytest
-tests/test_agent_gtk.py` (9 passed). 33 Node passed, plugin validates.
+tests/test_agent_gtk.py` (9 passed). 40 Node passed, plugin validates.
 qmllint has no errors; the remaining warnings are the kit's usual
 `Style.font.*`/`Color.*` missing-property noise and the `onExited`
 signal-parameter type.
@@ -108,8 +108,6 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
   by hand. The recovery path was driven through the helper with the same
   memfd protocol, and the GTK window passes its native widget tests on the VM
   display, but nobody has typed into it end to end.
-- Screenshots of every state in two dark and one light theme. Screen capture of
-  the VM was denied by the session's remote-desktop policy.
 - Folders of hundreds of gigabytes, and a drive filling up mid-copy (the 1.2×
   free-space check runs before the copy).
 - Manual-unlock drives as move destinations (refused by design).

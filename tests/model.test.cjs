@@ -47,7 +47,38 @@ test('moved folders are listed under their drive, and reclaimable counts only ke
  const moves=[{source:'/home/u/Videos',destMount:'/data',state:'rebooted',bound:true,stats:{bytes:2048}},{source:'/home/u/Music',destMount:'/data',state:'cleaned',bound:false,stats:{bytes:10}},{source:'/home/u/X',destMount:'/data',state:'awaiting-maintenance',stats:{bytes:5}},{source:'/home/u/Y',destMount:'/data2',state:'switched',stats:{bytes:7}}];
  assert.deepEqual(Array.from(m.movedFolders('/data',moves),f=>f.source),['/home/u/Videos','/home/u/Music']);
  assert.equal(m.reclaimable(moves),2048+7);});
-test('footer hints only list keys that work in that view',()=>{const m=model();assert.match(m.footerHints('overview'),/a add drive/);for(const v of ['manage','add','move','resume','progress'])assert.doesNotMatch(m.footerHints(v),/ a | m |enter/);});
+test('footer hints only list keys that work in that view',()=>{const m=model();const keys=v=>m.footerHints(v).map(h=>h[0]);assert.ok(keys('overview').includes('a'));assert.ok(keys('overview').includes('m'));for(const v of ['drive','add','move','resume','progress']){assert.ok(!keys(v).includes('a'),v);assert.ok(!keys(v).includes('m'),v);}assert.deepEqual([...keys('progress')],['esc']);});
+// ---- layout model (mockups A–F) ----
+function snap(){return {rootEncrypted:false,testFixtureMode:true,
+  disks:[{id:'vda',name:'vda',model:'Lexar NQ790 1TB',size:1e12,system:true,encrypted:true,serial:'SYS1',mounts:[{target:'/'}],usage:[{target:'/',total:1000,used:400,free:600}],state:'mounted'},
+         {id:'sdb',name:'sdb',model:'Lexar NM990 4TB',size:4e12,system:false,encrypted:true,serial:'TESTDATA0001',byId:'/dev/disk/by-id/a',mounts:[{target:'/data',fstype:'btrfs',options:'rw'}],usage:[{target:'/data',total:1000,used:300,free:700}],state:'mounted',selectable:false,transport:'usb'},
+         {id:'sdc',name:'sdc',model:'Crucial T705 2TB',size:2e12,system:false,encrypted:false,serial:'TESTNEW4F1A',byId:'/dev/disk/by-id/c',mounts:[],usage:[],state:'new',selectable:true,transport:'nvme'}],
+  drives:[{id:'d1',name:'data',state:'ready',serial:'TESTDATA0001',byId:'/dev/disk/by-id/a',mountpoint:'/data',autoUnlock:true}],
+  moves:[{id:'m1',source:'/home/u/Videos',destMount:'/data',state:'rebooted',bound:true,verified:true,stats:{bytes:200,files:3}},
+         {id:'m2',source:'/home/u/Music',destMount:'/data',state:'cleaned',bound:true,verified:true,stats:{bytes:100,files:2}}],mounts:[{target:'/'},{target:'/data'}]};}
+test('overview splits system, data drives with folder meter segments, and new disks',()=>{const m=model(),s=snap();
+  const sys=m.systemDisks(s);assert.equal(sys.length,1);assert.equal(sys[0].pill,'LUKS2 · boot');
+  const d=m.dataDrives(s);assert.equal(d.length,1);assert.equal(d[0].pill,'unlocks with OS');assert.equal(d[0].tone,'ok');assert.equal(d[0].problem,false);
+  assert.deepEqual(JSON.parse(JSON.stringify(d[0].segments)),[{color:0,fraction:0.2},{color:1,fraction:0.1}]);assert.ok(Math.abs(d[0].other-0)<1e-9);
+  assert.match(d[0].sub,/^\/data · 300 B used · 700 B free/);
+  const n=m.newDisks(s);assert.equal(n.length,1);assert.match(n[0].sub,/serial …4F1A/);
+  assert.equal(m.overviewMeta(s),'2 drives · 4.5 T · all encrypted');});
+test('folder rows read like the mockup and share their drive colour',()=>{const m=model(),f=m.folderRows(snap());
+  assert.deepEqual(f.map(r=>[r.source,r.dest,r.status,r.color]),[['~/Videos','/data','● mounted',0],['~/Music','/data','● mounted',1]]);});
+test('add wizard never offers the system disk or a disk in use, and says why',()=>{const m=model(),c=m.addCandidates(snap());
+  assert.equal(c[0].id,'sdc');const by=Object.fromEntries(c.map(x=>[x.id,x]));
+  assert.equal(by.vda.selectable,false);assert.match(by.vda.sub,/system disk/);assert.equal(by.sdb.selectable,false);assert.match(by.sdb.sub,/in use · \/data/);
+  assert.deepEqual(JSON.parse(JSON.stringify(m.suggestMount(snap()))),{mountpoint:'/data2',name:'data2'});});
+test('a missing drive becomes an alert card listing its locked folders',()=>{const m=model(),s=snap();s.disks.splice(1,1);s.moves[0].bound=false;s.moves[1].bound=false;
+  const a=m.alerts(s);assert.equal(a.length,1);assert.match(a[0].title,/isn't connected/);assert.deepEqual([...a[0].folders],['~/Videos','~/Music']);
+  assert.equal(m.dataDrives(s)[0].pill,'not connected');assert.equal(m.moveTargets(s).length,0);});
+test('a stale "not connected" refusal is hidden once the drive is mounted again',()=>{const m=model(),s=snap();
+  const mv={id:'u',source:'/home/u/Unplug',destMount:'/data',state:'awaiting-maintenance',error:'Not moved this time; nothing was changed. (the destination drive is not connected)'};
+  assert.equal(m.showMoveError(mv,s),false);s.disks.splice(1,1);assert.equal(m.showMoveError(mv,s),true);
+  assert.equal(m.showMoveError({...mv,error:'an app has files open'},snap()),true);assert.equal(m.showMoveError({...mv,needsAttention:true},snap()),true);});
+test('moved-folder checks and short sizes',()=>{const m=model();assert.equal(m.compact(350*1024**3),'350 G');assert.equal(m.compact(3.4*1024**4),'3.4 T');assert.equal(m.shortPath('/home/u/Videos'),'~/Videos');
+  const c=m.moveChecks({state:'switched',verified:true,bound:true,source:'/home/u/Videos',stats:{files:41203}});assert.equal(c.length,3);assert.match(c[0].text,/41,203 files/);assert.equal(c[2].pending,true);
+  assert.equal(m.moveChecks({state:'awaiting-maintenance'}).length,0);assert.equal(m.expandHome('~/Videos','/home/u'),'/home/u/Videos');});
 test('configured drive offers the right fix: reconnect, recovery passphrase, or plug it in',()=>{const m=model();
  const d={...configured(),id:'a'.repeat(32),keyfilePresent:true};
  assert.equal(m.driveFix(d,[],[]).action,'');assert.match(m.driveFix(d,[],[]).hint,/Plug the drive back in/);
@@ -57,3 +88,9 @@ test('configured drive offers the right fix: reconnect, recovery passphrase, or 
  assert.equal(m.driveFix(d,[present()],[]).action,'');
  const down=[{destMount:'/data2',state:'rebooted',bound:false}];
  assert.equal(m.driveFix(d,[present()],down).action,'reconnect');});
+test('folder arrows line up and move headers read cleanly',()=>{const m=model(),f=m.folderRows(snap());
+  assert.equal(f[0].label.indexOf('→'),f[1].label.indexOf('→'));assert.equal(f[1].label,'~/Music  → /data');
+  const mv=snap().moves[0];assert.equal(m.moveMeta(mv,null),'Moved · on /data');
+  const plan={id:'p',source:'/home/z/Pics',destMount:'/data',state:'awaiting-maintenance',stats:{bytes:2048,files:1200}};
+  assert.equal(m.moveMeta(plan,null),'Ready to move · to /data');assert.equal(m.moveFacts(plan,snap()),'2 K · 1,200 files · 700 B free on /data');assert.equal(m.moveFacts(mv,snap()),'');
+  assert.equal(m.dataTotal(snap()),'3.6 T');});
