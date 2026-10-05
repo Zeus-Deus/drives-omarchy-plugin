@@ -154,7 +154,7 @@ BarWidget {
                                 property var disk:root.disks[index]||({})
                                 width:content.width;spacing:Style.spacing.xs
                                 Button {
-                                    width:content.width;leftAlign:true;hasCursor:root.cursor===index
+                                    width:content.width;leftAlign:true;hasCursor:root.cursor===diskColumn.index
                                     text:Model.display(parent.disk.model)+" · "+Model.bytes(parent.disk.size)+"\n"+(parent.disk.system?"System · ":"")+Model.display(parent.disk.state)+" · "+(parent.disk.encrypted?"encrypted":"not encrypted")+(parent.disk.serial?" · …"+Model.display(parent.disk.serial.slice(-4)):"")
                                     enabled:root.view!=="add"||parent.disk.selectable===true
                                     onClicked: {root.selectedDiskId=parent.disk.id;if(root.view!=="add")root.selectDisk(parent.disk);}

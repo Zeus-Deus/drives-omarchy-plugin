@@ -24,9 +24,14 @@ def test_maintenance_ends_boot_splash_without_normal_boot_dependencies():
     text=unit.read_text()
     assert 'DefaultDependencies=no' in text
     assert 'Type=oneshot' in text and 'RemainAfterExit=yes' in text
-    assert 'ExecStart=-/usr/bin/plymouth quit' in text
-    assert 'ExecStart=-/usr/bin/plymouth --wait' in text
+    assert 'ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth quit' in text
+    assert 'ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth --wait' in text
+    assert 'ExecStart=-/usr/bin/pkill --exact plymouthd' in text
     assert 'TimeoutStartSec=20' in text
+    # A hung boot screen once timed the unit out and failed the target, so the
+    # move was refused; the bounded steps must fit inside the unit timeout.
+    budget=sum(int(line.split()[1]) for line in text.splitlines() if line.startswith('ExecStart=-/usr/bin/timeout '))
+    assert budget<20
     assert '[Install]' not in text
     target=(ROOT/'packaging/drives-maintenance.target').read_text()
     for key in ('Requires','After'):

@@ -326,7 +326,8 @@ def main():
         except (Failure,OSError,ValueError,KeyError) as error:
             # Refused before any change (identity, space, exclusion): nothing moved.
             # Changes after quarantine are handled inside continue/rollback.
-            j=c.read('moves',latch['moveId']);j['error']='Move not started: '+str(error)[:200]
+            j=c.read('moves',latch['moveId'])
+            j['error']='Not moved this time; nothing was changed. Restart again to retry. ('+str(error)[:160]+')'
             c.journal('moves',j['id'],j);outcome='refused'
             say(j['error'])
         maintenance.clear_latch(latch['moveId'])

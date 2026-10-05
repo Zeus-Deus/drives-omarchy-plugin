@@ -11,10 +11,13 @@ Before=drives-maintenance.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# A boot screen that already exited (or never started) is not a failure; the
-# audit separately refuses any residual plymouthd process.
-ExecStart=-/usr/bin/plymouth quit
-ExecStart=-/usr/bin/plymouth --wait
+# A boot screen that already exited (or never started) is not a failure, and a
+# hung one must not fail the whole maintenance target: every step is bounded
+# well inside TimeoutStartSec, and a boot screen that ignores quit is ended.
+# The audit separately refuses any residual plymouthd process.
+ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth quit
+ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth --wait
+ExecStart=-/usr/bin/pkill --exact plymouthd
 TimeoutStartSec=20
 User=root
 NoNewPrivileges=yes
