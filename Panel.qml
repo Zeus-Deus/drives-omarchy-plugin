@@ -199,12 +199,30 @@ BarWidget {
                         PanelSectionHeader {text:"CONFIGURED DATA DRIVES"}
                         Repeater {
                             model:root.configuredDrives.length
-                            Text {
+                            Column {
+                                id:driveRow
                                 required property int index
                                 property var drive:root.configuredDrives[index]||({})
                                 readonly property string observedState:Model.configuredDriveState(drive,root.disks)
-                                width:content.width;text:Model.display(drive.name)+" · "+observedState+"\n"+Model.display(drive.mountpoint)
-                                color:observedState==="Mounted"?root.ink:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                                readonly property var fix:Model.driveFix(drive,root.disks,root.storage.moves||[])
+                                width:content.width;spacing:Style.spacing.xs
+                                Text {
+                                    width:content.width;text:Model.display(driveRow.drive.name)+" · "+driveRow.observedState+"\n"+Model.display(driveRow.drive.mountpoint)
+                                    color:driveRow.observedState==="Mounted"&&driveRow.fix.hint===""?root.ink:Color.urgent;font.family:Style.font.family;font.pixelSize:Style.font.body;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                                }
+                                Text {
+                                    width:content.width;visible:driveRow.fix.hint!=="";text:driveRow.fix.hint
+                                    color:root.ink;font.family:Style.font.family;font.pixelSize:Style.font.bodySmall;wrapMode:Text.WordWrap;textFormat:Text.PlainText
+                                }
+                                Button {
+                                    visible:driveRow.fix.action!==""
+                                    text:driveRow.fix.action==="recover"?"Unlock with recovery passphrase…":"Reconnect drive"
+                                    enabled:root.storage.helperAvailable&&!service.mutating
+                                    onClicked:{
+                                        if(driveRow.fix.action==="recover")service.launch(["unlock","--drive",driveRow.drive.id,"--label",Model.display(driveRow.drive.name)+" · "+Model.display(driveRow.drive.mountpoint)]);
+                                        else service.submit({op:"reconnect_drive",id:driveRow.drive.id});
+                                    }
+                                }
                             }
                         }
                     }
@@ -310,7 +328,7 @@ BarWidget {
     }
     IpcHandler {
         target:"drives"
-        function status():string{return JSON.stringify({opened:root.opened,view:root.view,cursor:root.cursor,contentY:flick.contentY,confirmOpen:confirm.opened,confirmSelection:confirm.selectedIndex,snapshot:root.storage,rates:service.rates,footer:Model.footerHints(root.view),error:service.error});}
+        function status():string{return JSON.stringify({opened:root.opened,view:root.view,cursor:root.cursor,contentY:flick.contentY,confirmOpen:confirm.opened,confirmSelection:confirm.selectedIndex,snapshot:root.storage,rates:service.rates,footer:Model.footerHints(root.view),busy:service.busy,request:service.request.op,pending:service.pending?service.pending.op:"",error:service.error});}
         function open():void{root.open();}
         function close():void{root.close();}
         function refresh():void{service.refresh();}
@@ -320,6 +338,7 @@ BarWidget {
         function setMove(source:string,dest:string):void{sourceField.text=source;destinationField.text=dest;root.go("move");}
         function reviewMove():void{root.startMove();}
         function moveAction(op:string):string{if(!root.chosenMove||Model.moveActions(root.chosenMove,root.pendingRestart).indexOf(op)<0)return "unavailable";root.action(op);return "ok";}
+        function reconnect(name:string):string{var ds=root.configuredDrives;for(var i=0;i<ds.length;i++)if(ds[i].name===name){if(Model.driveFix(ds[i],root.disks,root.storage.moves||[]).action!=="reconnect")return "unavailable";service.submit({op:"reconnect_drive",id:ds[i].id});return "ok";}return "missing";}
         function serial(fragment:string):string{serialField.text=fragment;return Model.canProvision(root.chosenDisk,fragment)?"matched":"rejected";}
     }
 }

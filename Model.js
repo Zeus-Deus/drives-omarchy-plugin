@@ -36,6 +36,17 @@ function configuredDriveState(drive,disks) {
     }
     return "Not mounted";
 }
+// What the panel can do for a configured drive that is not fully available.
+// Moved folders on it count: a mounted drive whose binds are down still needs
+// reconnecting (e.g. it was unplugged and plugged back in).
+function driveFix(drive,disks,moves) {
+    var state=configuredDriveState(drive,disks);
+    var down=(moves||[]).some(function(m){return m.destMount===drive.mountpoint&&["switched","rebooted","cleaning","cleaned"].indexOf(m.state)>=0&&!m.bound;});
+    if(state==="Missing drive")return {action:"",hint:"Plug the drive back in. Folders moved onto it stay locked, so nothing is written to the OS disk."};
+    if(state==="Locked"&&drive.keyfilePresent===false)return {action:"recover",hint:"This computer no longer has the drive's key (reinstall or new machine). Unlock it with the recovery passphrase."};
+    if(state==="Locked"||state==="Not mounted"||(state==="Mounted"&&down))return {action:"reconnect",hint:"The drive is connected but not in use. Reconnect it with its own key; no passphrase needed."};
+    return {action:"",hint:""};
+}
 // The ready Drives record for a present disk (exact by-id + serial), or null.
 function configuredFor(disk,drives) {
     var m=(drives||[]).filter(function(d){return d.state==="ready"&&d.byId===disk.byId&&d.serial===disk.serial&&!!d.serial;});

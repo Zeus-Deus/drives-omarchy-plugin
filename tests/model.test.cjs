@@ -48,3 +48,12 @@ test('moved folders are listed under their drive, and reclaimable counts only ke
  assert.deepEqual(Array.from(m.movedFolders('/data',moves),f=>f.source),['/home/u/Videos','/home/u/Music']);
  assert.equal(m.reclaimable(moves),2048+7);});
 test('footer hints only list keys that work in that view',()=>{const m=model();assert.match(m.footerHints('overview'),/a add drive/);for(const v of ['manage','add','move','resume','progress'])assert.doesNotMatch(m.footerHints(v),/ a | m |enter/);});
+test('configured drive offers the right fix: reconnect, recovery passphrase, or plug it in',()=>{const m=model();
+ const d={...configured(),id:'a'.repeat(32),keyfilePresent:true};
+ assert.equal(m.driveFix(d,[],[]).action,'');assert.match(m.driveFix(d,[],[]).hint,/Plug the drive back in/);
+ const locked=[{...present(),state:'locked',mounts:[]}];
+ assert.equal(m.driveFix(d,locked,[]).action,'reconnect');
+ assert.equal(m.driveFix({...d,keyfilePresent:false},locked,[]).action,'recover');
+ assert.equal(m.driveFix(d,[present()],[]).action,'');
+ const down=[{destMount:'/data2',state:'rebooted',bound:false}];
+ assert.equal(m.driveFix(d,[present()],down).action,'reconnect');});

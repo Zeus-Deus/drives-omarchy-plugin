@@ -4,8 +4,8 @@ from helper.common import Common,Failure
 from helper.moves import MoveManager,ACTIVE
 
 BUS='io.github.zeus_deus.Drives';OBJECT='/io/github/zeus_deus/Drives'
-ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume','UnlockDrive':'unlock'}
-SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
+ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume','UnlockDrive':'unlock','ReconnectDrive':'reconnect'}
+SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ReconnectDrive':'s','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
 
 def pending_restart():
     """The armed maintenance request, as plain facts for the panel."""
@@ -89,6 +89,9 @@ class Server:
                 elif method=='UnlockDrive':
                     from helper.provisioning import unlock
                     result=unlock(args[0],secret,self.c)
+                elif method=='ReconnectDrive':
+                    from helper.provisioning import reconnect
+                    result=reconnect(args[0],self.c)
                 elif method=='ResumeDrive':
                     from helper.provisioning import resume
                     result=resume(args[0],self.c)

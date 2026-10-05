@@ -34,6 +34,7 @@ def inspect(common):
     for j in common.records('drives'):
         r=dict(j)
         if r['state']!='ready':r['state']='unfinished';r['error']='Interrupted provisioning: inspect existing partition/header. Never format it again.'
+        elif r.get('autoUnlock'):r['keyfilePresent']=keyfile_ok(r)
         rows.append(r)
     return rows
 
@@ -120,9 +121,7 @@ def unlock(id,secret,common):
     j=common.read('drives',id)
     if j.get('state')!='ready':raise Failure('drive setup is unfinished; continue setup instead')
     name=j['name'];mapper='/dev/mapper/'+name
-    part=os.path.realpath(j.get('partitionById') or j['partition'],strict=True)
-    run(['cryptsetup','isLuks',part])
-    if j.get('luksUUID') and run(['cryptsetup','luksUUID',part]).decode().strip()!=j['luksUUID']:raise Failure('this is not the configured drive')
+    part=configured_partition(j)
     if j.get('luksUUID'):
         from helper.common import hide_from_automount
         hide_from_automount(j['name'],j['luksUUID'])
@@ -132,6 +131,46 @@ def unlock(id,secret,common):
         try:run(['cryptsetup','open','--key-file','-',part,name],data=secret,timeout=180)
         except Failure:raise Failure('the recovery passphrase did not unlock this drive') from None
     run(['udevadm','settle'],timeout=60)
+    return mount_and_reconnect(j,common)
+
+
+def configured_partition(j):
+    part=os.path.realpath(j.get('partitionById') or j['partition'],strict=True)
+    run(['cryptsetup','isLuks',part])
+    if j.get('luksUUID') and run(['cryptsetup','luksUUID',part]).decode().strip()!=j['luksUUID']:raise Failure('this is not the configured drive')
+    return part
+
+
+def keyfile_ok(j):
+    key=pathlib.Path('/etc/cryptsetup-keys.d')/(j['name']+'.key')
+    try:info=os.stat(key,follow_symlinks=False)
+    except OSError:return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o077
+
+
+def reconnect(id,common):
+    """Bring back a drive that was unplugged or not ready at boot, using its
+    own keyfile (no passphrase), and reconnect folders moved onto it."""
+    if not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid drive id')
+    j=common.read('drives',id)
+    if j.get('state')!='ready':raise Failure('drive setup is unfinished; continue setup instead')
+    if not j.get('autoUnlock'):raise Failure('this drive unlocks only with its recovery passphrase')
+    try:part=configured_partition(j)
+    except (OSError,Failure):raise Failure('the drive is not connected') from None
+    if not keyfile_ok(j):raise Failure("this drive's unlock key is missing on this computer; use the recovery passphrase")
+    mapper='/dev/mapper/'+j['name']
+    if os.path.exists(mapper):
+        if not any(any(n['name']==part for n in c) for c in chains(blocks()).get(mapper,[])):raise Failure('mapper name is used by another device')
+    else:
+        unit=run(['systemd-escape','--template=systemd-cryptsetup@.service',j['name']]).decode().strip()
+        try:run(['systemctl','start',unit],timeout=120)
+        except Failure:raise Failure('the drive could not be unlocked with its key') from None
+    run(['udevadm','settle'],timeout=60)
+    return mount_and_reconnect(j,common)
+
+
+def mount_and_reconnect(j,common):
+    id=j['id'];name=j['name'];mapper='/dev/mapper/'+name
     mountpoint=j['mountpoint']
     if not any(r['target']==mountpoint and r['fstype']=='btrfs' for r in mount_rows()):
         if j.get('autoUnlock'):
