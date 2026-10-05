@@ -123,6 +123,9 @@ def unlock(id,secret,common):
     part=os.path.realpath(j.get('partitionById') or j['partition'],strict=True)
     run(['cryptsetup','isLuks',part])
     if j.get('luksUUID') and run(['cryptsetup','luksUUID',part]).decode().strip()!=j['luksUUID']:raise Failure('this is not the configured drive')
+    if j.get('luksUUID'):
+        from helper.common import hide_from_automount
+        hide_from_automount(j['name'],j['luksUUID'])
     if os.path.exists(mapper):
         if not any(any(n['name']==part for n in c) for c in chains(blocks()).get(mapper,[])):raise Failure('mapper name is used by another device')
     else:

@@ -64,6 +64,10 @@ def finish(j,common):
     if not already:prepare_mountpoint(str(mountpoint))
     uuid_value=run(['blkid','-s','UUID','-o','value',part]).decode().strip();j['luksUUID']=uuid_value
     j['partitionById']=req['byId']+'-part1'
+    common.journal('drives',id,j)
+    # Before crypttab exists: no desktop automounter may prompt for this volume.
+    from helper.common import hide_from_automount
+    hide_from_automount(req['name'],uuid_value)
     if req['autoUnlock']:
         common.config('/etc/crypttab',id,req['name']+' UUID='+uuid_value+' '+str(keypath)+' luks,nofail,headless=yes')
         common.config('/etc/fstab',id,mapper+' '+escape_fstab(str(mountpoint))+' btrfs compress=zstd:3,nodiscard,nofail,x-systemd.automount,x-systemd.device-timeout=30s 0 0')

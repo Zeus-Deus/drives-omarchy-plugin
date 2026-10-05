@@ -142,6 +142,18 @@ class Common:
             '--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE',
             '/usr/bin/python3','-B','-m','helper.configwriter',request.name],timeout=60)
 
+def hide_from_automount(name,luks_uuid):
+    """Keep udiskie/file managers from prompting for a Drives-managed volume."""
+    from helper.udevhide import rule_text
+    rule_text(name,luks_uuid)  # validate before starting anything
+    run(['systemd-run','--quiet','--wait','--collect','--pipe',
+        '--unit=drives-udev-'+uuid.uuid4().hex,
+        '--property=WorkingDirectory=/usr/lib/drives-helper',
+        '--property=ProtectSystem=strict','--property=ReadWritePaths=/etc/udev/rules.d',
+        '--property=ProtectHome=yes','--property=PrivateTmp=yes','--property=NoNewPrivileges=yes',
+        '--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE',
+        '/usr/bin/python3','-B','-m','helper.udevhide',name,luks_uuid],timeout=120)
+
 def prepare_mountpoint(path):
     from helper.mountpoint import validate
     validate(path)

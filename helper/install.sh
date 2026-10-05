@@ -27,5 +27,7 @@ systemctl daemon-reload
 systemctl reload dbus.service
 systemctl enable --now drives-helper.service
 systemctl restart drives-helper.service
+# Drives set up by an older version: hide them from desktop automount prompts.
+(cd /usr/lib/drives-helper && /usr/bin/python3 -B -m helper.udevhide --all)
 printf '%s
 ' 'Helper installed. No disk was provisioned or folder moved.'
