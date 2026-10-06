@@ -219,7 +219,7 @@ function spaceRows(snapshot,limit) {
     visibleMoves(snapshot.moves||[]).forEach(function(m){if(FINISHED.indexOf(m.state)<0)planned[m.source]=1;});
     (snapshot.mounts||[]).forEach(function(m){mounted[m.target]=1;});
     var all=(s.entries||[]).filter(function(e){return !mounted[e.path]&&e.bytes>0;}).sort(function(a,b){return b.bytes-a.bytes;});
-    var rows=all.slice(0,limit||12).map(function(e,i){
+    var rows=all.slice(0,limit===0?all.length:(limit||12)).map(function(e,i){
         var name=e.path.split("/").pop(),why=moveBlocker(e.path);
         if(!why&&name.charAt(0)===".")why=steam&&steam.indexOf(e.path+"/")===0?"holds Steam · move the games under Apps":"hidden app folder · stays on the OS disk";
         if(!why&&planned[e.path])why="move already planned";
@@ -231,6 +231,29 @@ function spaceRows(snapshot,limit) {
         if(rest>0)rows.push({path:"",title:"System, apps & snapshots",bytes:rest,size:compact(rest),color:-1,movable:false,why:"outside your home folder"});
     }
     return rows;
+}
+// How many home folders were measured, and how many the short list hides.
+function spaceCount(snapshot,limit) {
+    var s=snapshot.sizes||{},mounted={};(snapshot.mounts||[]).forEach(function(m){mounted[m.target]=1;});
+    var n=(s.entries||[]).filter(function(e){return !mounted[e.path]&&e.bytes>0;}).length;
+    return {total:n,hidden:Math.max(0,n-(limit||12))};
+}
+// Progress line while sizes stream in: "Measuring… 14 folders so far · 0:23".
+function sizeProgress(sizes,elapsedMs) {
+    if(!sizes||!sizes.started)return "";
+    var n=(sizes.entries||[]).length,t=Math.max(0,Math.floor((elapsedMs||0)/1000));
+    var clock=Math.floor(t/60)+":"+(t%60<10?"0":"")+(t%60);
+    if(!sizes.done)return "Measuring your home folder · "+n+(n===1?" folder":" folders")+" so far · "+clock;
+    if(sizes.error)return "Couldn't finish measuring: "+sizes.error;
+    return sizes.complete?"Measured "+n+" folders in "+clock+". Folders already on a data drive aren't counted.":"Measured "+n+" folders before the time limit; some may be missing. Press r to measure again.";
+}
+// A folder typed by hand on the OS-disk screen: absolute path, or "" + why not.
+function typedFolder(text,home) {
+    var p=expandHome(text,home).replace(/\/+$/,"");
+    if(p==="")return {path:"",why:""};
+    if(p.charAt(0)!=="/")return {path:"",why:"Type a full path, like ~/Videos or /home/you/Games."};
+    var why=moveBlocker(p);
+    return {path:why?"":p,why:why?shortPath(p)+": "+why:""};
 }
 // OS-disk meter: one segment per listed home folder.
 function systemSegments(snapshot) {
@@ -337,13 +360,15 @@ function targetIssue(r) {
     var d=r.disk||{},u=r.usage;
     if(!u)return "This drive isn't mounted.";
     if(d.bootUnlock!=="keyfile")return "Folders can only move onto a drive that unlocks with the OS (a keyfile in crypttab).";
-    if(u.rootOwned!==true)return display(u.target)+" is owned by your user, so the helper won't move folders into it (another program running as you could swap the folder mid-move). To allow it: sudo chown root:root "+display(u.target)+" && sudo chmod 755 "+display(u.target)+". Your existing folders on it keep working.";
+    if(u.rootOwned!==true)return "One step first: "+display(u.target)+" belongs to your user, and folders are only moved into a drive folder owned by the system (so no other program can swap things mid-move).";
     return "";
 }
+// The one issue the panel can fix itself: a user-owned top folder.
+function canPrepare(r){return !!r&&!r.drive&&!!r.usage&&r.disk&&r.disk.bootUnlock==="keyfile"&&r.usage.rootOwned!==true;}
 // Drives that are mounted but can't take a moved folder, with the reason.
 function blockedTargets(snapshot) {
     return dataDrives(snapshot).filter(function(r){return !r.drive&&r.state==="Mounted"&&targetIssue(r)!=="";})
-        .map(function(r){return {title:r.title,mount:r.usage?display(r.usage.target):"",issue:targetIssue(r)};});
+        .map(function(r){return {key:r.key,title:r.title,mount:r.usage?display(r.usage.target):"",mountpoint:r.usage?r.usage.target:"",issue:targetIssue(r),prepare:canPrepare(r)};});
 }
 // Rows for the MOVED FOLDERS section, colour-matched to their drive's meter.
 function folderRows(snapshot) {

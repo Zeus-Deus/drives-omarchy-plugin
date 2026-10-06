@@ -47,8 +47,9 @@ folders; read it first if you like, it is short. Everything it needs
 (`cryptsetup`, `rsync`, `btrfs-progs`, `python-gobject`, `gtk4`,
 `smartmontools`) is already part of a standard Omarchy install.
 
-Update later with `omarchy plugin update io.github.zeus-deus.drives`, then run
-the same `install.sh` again to refresh the helper.
+Update later with `omarchy plugin update io.github.zeus-deus.drives` and
+`omarchy-restart-shell`. When the helper changed too, run the same `install.sh`
+again.
 
 Every write action asks for your administrator password through Omarchy's
 polkit prompt. The recovery passphrase is entered in a separate small window,
@@ -56,13 +57,28 @@ never in the panel.
 
 ## Uninstall
 
+Two commands, in this order (the helper first, while its uninstaller is still
+on disk):
+
 ```sh
 sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/uninstall.sh
-omarchy plugin remove io.github.zeus-deus.drives
+omarchy plugin remove io.github.zeus-deus.drives --yes
 ```
 
 The uninstaller refuses while a move is scheduled. It keeps drive keys,
-crypttab/fstab entries and your data, so moved folders keep working.
+crypttab/fstab entries and your data, so drives still unlock at boot and moved
+folders keep working without the plugin.
+
+## Drives you set up yourself
+
+A LUKS drive you already unlock at boot (crypttab keyfile) and mount in fstab
+shows up as **unlocks with OS**, and the folders you bind-mounted from it are
+listed. Drives never edits its crypttab or fstab lines.
+
+To move folders onto such a drive, open it in the panel and choose **Prepare
+for moves…** once. That makes only its top folder (for example `/data`) owned
+by root, which the helper requires so no other program can swap a folder
+mid-move. Everything inside stays yours and keeps working.
 
 ## Good to know
 

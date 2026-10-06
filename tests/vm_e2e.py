@@ -6,6 +6,7 @@ It refuses to run outside a KVM guest and only touches TEST* serial disks.
   provision <SERIAL> <name> <mountpoint>   ProvisionDrive with a generated recovery secret
   unlock <name>                            UnlockDrive: wrong passphrase, then the saved recovery secret
   reconnect <name>                         ReconnectDrive: re-plugged drive, its own keyfile
+  prepare <mountpoint>                     PrepareDrive: root-own a hand-made drive's top folder
   plan <src> <destMount>                   StartMove (normal session: plan only)
   request <moveId> continue|rollback       Resume/RollbackMove: arm the next-boot request
   cancel-request <moveId>                  CancelRestart
@@ -67,6 +68,7 @@ def main(argv):
     elif op=='reconnect':
         record=next(d for d in status()['drives'] if d['name']==argv[1])
         result=submit('ReconnectDrive',(record['id'],))
+    elif op=='prepare':result=submit('PrepareDrive',(argv[1],))
     elif op=='plan':result=submit('StartMove',(argv[1],argv[2]))
     elif op=='request':result=submit('ResumeMove' if argv[2]=='continue' else 'RollbackMove',(argv[1],))
     elif op=='cancel-request':result=submit('CancelRestart',(argv[1],))

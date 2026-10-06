@@ -59,6 +59,10 @@ Item {
     property var sizes: Model.emptySizes()
     property bool sizing: sizer.running
     property real sizedAt: 0
+    property real sizeStarted: 0
+    property real now: Date.now()
+    // Ticks only while measuring, for the elapsed-time readout.
+    Timer { interval: 1000; repeat: true; running: sizer.running; onTriggered: root.now = Date.now() }
     property var sizeRequest: ({op: "sizes", paths: []})
     property var queuedPaths: null
     // A new set of folders to measure (e.g. the drive list just loaded)
@@ -69,7 +73,7 @@ Item {
         if (sizer.running) { if (!same || force) queuedPaths = paths; return; }
         if (!force && same && sizedAt > 0 && Date.now() - sizedAt < 600000 && sizes.done) return;
         sizeRequest = {op: "sizes", paths: paths};
-        sizes = Model.emptySizes(true);
+        sizes = Model.emptySizes(true); sizeStarted = Date.now(); now = sizeStarted;
         sizer.command = Model.boundedArgv(["/usr/bin/python3", "-B", bridgePath, "--sizes"]);
         sizer.stdinEnabled = true; sizer.running = true;
     }

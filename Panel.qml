@@ -24,6 +24,7 @@ BarWidget {
     property string moveTarget: ""
     property string watchJob: ""
     property int cursor: 0
+    property bool showAllSpace: false
     property var confirmationAction: null
 
     readonly property bool opened: controller.open
@@ -46,7 +47,9 @@ BarWidget {
     readonly property var targets: Model.moveTargets(storage)
     readonly property var manualRows: Model.manualFolderRows(storage)
     readonly property var apps: Model.appRows(storage)
-    readonly property var spaceRows: Model.spaceRows(storage)
+    readonly property var spaceRows: Model.spaceRows(storage, showAllSpace ? 0 : 12)
+    readonly property var spaceCount: Model.spaceCount(storage, 12)
+    readonly property var typed: Model.typedFolder(otherField.text, home)
     readonly property var sysRow: systemRows.length ? systemRows[0] : null
     // Measure hand-made bind mounts as soon as the drive list shows them.
     readonly property string sizeKey: JSON.stringify(Model.sizePaths(service.snapshot))
@@ -87,9 +90,11 @@ BarWidget {
             if (restartArmed) out.push({kind: "act", id: "restart"});
         } else if (view === "system") {
             spaceRows.forEach(function(r) { if (r.movable) out.push({kind: "space", id: r.path}); });
+            if (spaceCount.hidden > 0 && !showAllSpace) out.push({kind: "act", id: "showall"});
             apps.forEach(function(a) { if (a.movable) out.push({kind: "app", id: a.id}); });
         } else if (view === "drive" && chosenDrive) {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
+            if (Model.canPrepare(chosenDrive)) out.push({kind: "act", id: "prepare"});
             folderRows.forEach(function(f) { if (cdConfigured && f.move.destMount === chosenDrive.drive.mountpoint) out.push({kind: "move", id: f.id}); });
             if (cdConfigured) out.push({kind: "act", id: "export"});
         } else if (view === "add") {
@@ -147,7 +152,7 @@ BarWidget {
     function open() { controller.open = true; service.opened = true; Qt.callLater(function() { service.scanSizes(Model.sizePaths(root.storage), false); }); }
     function close() { confirm.opened = false; controller.open = false; service.opened = false; }
     function closeForPopoutSwitch() { controller.popoutSwitchClosing = true; close(); Qt.callLater(function() { controller.popoutSwitchClosing = false; }); }
-    function go(where) { view = where; cursor = 0; flick.contentY = 0; catcher.forceActiveFocus(); }
+    function go(where) { pointerGate.reset(); view = where; cursor = 0; flick.contentY = 0; catcher.forceActiveFocus(); }
     function back() {
         if (view === "add" && addStep === 2) { addStep = 1; cursor = Math.max(0, navIndex("pick", selectedDiskId)); return; }
         if (view === "overview") close(); else go("overview");
@@ -158,7 +163,7 @@ BarWidget {
     }
     function openDrive(key) { selectedKey = key; go("drive"); }
     function openMove(id) { selectedMoveId = id; go("resume"); }
-    function openSystem() { go("system"); service.scanSizes(Model.sizePaths(storage), false); }
+    function openSystem() { showAllSpace = false; otherField.text = ""; go("system"); service.scanSizes(Model.sizePaths(storage), false); }
     function openApp(id) {
         for (var i = 0; i < apps.length; i++) if (apps[i].id === id) {
             if (apps[i].movable) openMoveFolder(apps[i].path, "");
@@ -185,7 +190,7 @@ BarWidget {
         go("move");
         cursor = Math.max(0, navIndex("target", moveTarget));
     }
-    function moveCursor(dy) { if (nav.length) cursor = Math.max(0, Math.min(nav.length - 1, cursor + dy)); }
+    function moveCursor(dy) { pointerGate.reset(); if (nav.length) cursor = Math.max(0, Math.min(nav.length - 1, cursor + dy)); }
     function ensureVisible(item) {
         var p = item.mapToItem(content, 0, 0);
         if (p.y < flick.contentY) flick.contentY = p.y;
@@ -207,11 +212,13 @@ BarWidget {
     }
     function act(op) {
         if (op === "home") return go("overview");
+        if (op === "showall") { showAllSpace = true; return; }
         if (op === "restart")
             return ask("Restart now?\nOpen windows close. This restart takes a little longer while the folder is handled, then your desktop comes back.",
                        function() { close(); Quickshell.execDetached(["omarchy-system-reboot"]); }, "Restart");
         if (!canWrite) return;
         if (op === "reconnect" && cdConfigured) return service.submit({op: "reconnect_drive", id: chosenDrive.drive.id});
+        if (op === "prepare" && chosenDrive && Model.canPrepare(chosenDrive)) return prepareDrive(chosenDrive.usage.target);
         if (op === "recover" && cdConfigured)
             return service.launch(["unlock", "--drive", chosenDrive.drive.id, "--label", Model.display(chosenDrive.drive.name) + " · " + Model.display(chosenDrive.drive.mountpoint)]);
         if (op === "export") return exportHeader();
@@ -227,6 +234,12 @@ BarWidget {
             cancel_restart: ["Don't move " + name + " on the next restart?", "Don't move"]
         };
         if (words[op]) ask(words[op][0], function() { service.submit({op: op, id: id}); }, words[op][1]);
+    }
+    // A drive set up by hand: make its top folder owned by root so folders can move onto it.
+    function prepareDrive(mountpoint) {
+        var m = Model.display(mountpoint);
+        ask("Prepare " + m + " for moves?\nOnly the " + m + " folder itself becomes owned by the system. Everything inside it stays yours and keeps working. Afterwards, new top-level folders in " + m + " are made by moving a folder here (or with sudo).",
+            function() { service.submit({op: "prepare_drive", mountpoint: mountpoint}); }, "Prepare");
     }
     function provision() {
         var disk = chosenDisk;
@@ -251,8 +264,8 @@ BarWidget {
     readonly property var actionWords: ({
         resume_move: ["󰑓", "Move on next restart…", ""], restart: ["󰜉", "Restart now…", ""], cancel_restart: ["󰜺", "Don't move on next restart", ""],
         rollback_move: ["󰕌", "Undo move…", ""], delete_old_copy: ["󰆴", "Delete old copy…", "bad"], cancel_move: ["󰜺", "Cancel move…", ""],
-        reconnect: ["󰌆", "Reconnect drive", ""], recover: ["󰌆", "Unlock with recovery passphrase…", ""], export: ["󰈔", "Export header backup", ""],
-        provision: ["󰌾", "Encrypt & set up…", ""], review: ["󰉒", "Review move…", ""], home: ["󰋊", "Back to drives", ""]
+        prepare: ["󰒓", "Prepare for moves…", ""], reconnect: ["󰌆", "Reconnect drive", ""], recover: ["󰌆", "Unlock with recovery passphrase…", ""], export: ["󰈔", "Export header backup", ""],
+        provision: ["󰌾", "Encrypt & set up…", ""], review: ["󰉒", "Review move…", ""], home: ["󰋊", "Back to drives", ""], showall: ["󰁅", "Show all folders", ""]
     })
 
     Service {
@@ -365,7 +378,10 @@ BarWidget {
             hoverEnabled: true
             enabled: row.selectable && row.enabled
             cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse && row.navIndex >= 0) root.cursor = row.navIndex
+            // Only real pointer movement moves the highlight. A row sliding under a
+            // resting pointer while the wheel scrolls must not grab it (and pull the
+            // list back via ensureVisible).
+            onPositionChanged: function(mouse) { if (row.navIndex >= 0 && pointerGate.moved(row, mouse)) root.cursor = row.navIndex }
             onClicked: row.chosen()
         }
         Item {
@@ -517,7 +533,7 @@ BarWidget {
         PanelKeyCatcher {
             id: catcher
             anchors.fill: parent
-            blocked: confirm.opened || serialField.activeFocus || nameField.activeFocus || mountField.activeFocus || folderField.activeFocus || exportField.activeFocus
+            blocked: confirm.opened || serialField.activeFocus || nameField.activeFocus || mountField.activeFocus || folderField.activeFocus || otherField.activeFocus || exportField.activeFocus
             onCloseRequested: root.back()
             onMoveRequested: function(dx, dy) { root.moveCursor(dy); }
             onActivateRequested: root.activate()
@@ -528,6 +544,8 @@ BarWidget {
                 else if (t === "a" && root.storage.helperAvailable) root.openAdd("");
                 else if (t === "m" && root.storage.helperAvailable) root.openMoveFolder("", "");
             }
+
+            PointerMoveGate { id: pointerGate; referenceItem: catcher }
 
             Flickable {
                 id: flick
@@ -774,13 +792,52 @@ BarWidget {
                             segments: segs
                             other: root.sysRow ? Math.max(0, root.sysRow.other - segs.reduce(function(a, x) { return a + x.fraction; }, 0)) : 0
                         }
-                        Note {
-                            text: !root.storage.sizes.started ? "" : (!root.storage.sizes.done ? "Measuring your home folder… big folders appear as they finish. Nothing is changed."
-                                : (root.storage.sizes.complete ? "Measured just now. Folders already on a data drive aren't counted here." : "Measured what it could in time; some folders may be missing. Press r to measure again."))
-                            visible: text !== ""
+                        // Live progress while du runs: spinner, count, elapsed time.
+                        Row {
+                            width: content.width
+                            spacing: Style.space(8)
+                            visible: root.storage.sizes.started === true
+                            Text {
+                                id: spinner
+                                text: root.storage.sizes.done ? "󰄬" : "󰑓"
+                                color: root.storage.sizes.done ? root.dim : Color.accent
+                                font.family: root.face
+                                font.pixelSize: Style.font.body
+                                textFormat: Text.PlainText
+                                RotationAnimator on rotation { from: 0; to: 360; duration: 1100; loops: Animation.Infinite; running: !root.storage.sizes.done && root.view === "system" }
+                                onTextChanged: if (root.storage.sizes.done) rotation = 0
+                            }
+                            Text {
+                                width: parent.width - spinner.width - Style.space(8)
+                                text: Model.sizeProgress(root.storage.sizes, service.now - service.sizeStarted)
+                                color: root.storage.sizes.done ? root.dim : root.ink
+                                wrapMode: Text.WordWrap
+                                font.family: root.face
+                                font.pixelSize: Style.font.bodySmall
+                                textFormat: Text.PlainText
+                            }
+                        }
+                        // Thin indeterminate bar under the progress line.
+                        Rectangle {
+                            id: scanTrack
+                            width: content.width
+                            height: Style.space(2)
+                            visible: root.storage.sizes.started === true && !root.storage.sizes.done
+                            color: Util.alpha(root.ink, 0.1)
+                            clip: true
+                            Rectangle {
+                                width: scanTrack.width * 0.25
+                                height: parent.height
+                                color: Color.accent
+                                NumberAnimation on x { from: -scanTrack.width * 0.25; to: scanTrack.width; duration: 1400; loops: Animation.Infinite; running: scanTrack.visible && root.view === "system" }
+                            }
                         }
 
-                        SectionHead { label: "WHAT TAKES SPACE"; trail: root.spaceRows.length ? "biggest first" : "" }
+                        SectionHead { label: "WHAT TAKES SPACE"; trail: root.spaceRows.length ? (root.spaceCount.hidden > 0 && !root.showAllSpace ? "biggest 12 of " + root.spaceCount.total : "biggest first") : "" }
+                        Note {
+                            visible: root.storage.sizes.started === true && !root.storage.sizes.done && root.spaceRows.length === 0
+                            text: "Folders show up here as each one is measured. A big folder can take a minute."
+                        }
                         Repeater {
                             model: root.spaceRows.length
                             NavRow {
@@ -798,6 +855,32 @@ BarWidget {
                                 onChosen: root.openMoveFolder(r.path, "")
                             }
                         }
+
+                        ActionRow { visible: root.spaceCount.hidden > 0 && !root.showAllSpace; op: "showall"; title: "Show all " + root.spaceCount.total + " folders" }
+
+                        SectionHead { label: "ANY OTHER FOLDER"; trail: "" }
+                        Row {
+                            width: content.width
+                            spacing: Style.space(8)
+                            Field {
+                                id: otherField
+                                width: parent.width - otherButton.width - Style.space(8)
+                                placeholderText: "~/Games/Library"
+                                Keys.onReturnPressed: if (root.typed.path !== "") root.openMoveFolder(root.typed.path, "")
+                            }
+                            Button {
+                                id: otherButton
+                                anchors.verticalCenter: otherField.verticalCenter
+                                bordered: true
+                                foreground: root.ink
+                                fontFamily: root.face
+                                text: "Move… ⏎"
+                                enabled: root.typed.path !== ""
+                                opacity: enabled ? 1 : 0.4
+                                onClicked: root.openMoveFolder(root.typed.path, "")
+                            }
+                        }
+                        Note { visible: root.typed.why !== ""; text: root.typed.why; color: Color.urgent }
 
                         SectionHead { visible: root.apps.some(function(a) { return a.movable; }); label: "APPS"; trail: "" }
                         Repeater {
@@ -822,6 +905,15 @@ BarWidget {
                                 readonly property var b: Model.blockedTargets(root.storage)[index] || ({})
                                 Text { width: parent.width; text: "Moving folders onto " + (b.title || "") + " (" + (b.mount || "") + ")"; color: root.ink; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
                                 Text { width: parent.width; text: b.issue || ""; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                                Button {
+                                    visible: b.prepare === true
+                                    bordered: true
+                                    foreground: root.ink
+                                    fontFamily: root.face
+                                    text: "󰒓  Prepare " + (b.mount || "") + " for moves…"
+                                    enabled: root.canWrite
+                                    onClicked: root.prepareDrive(b.mountpoint)
+                                }
                             }
                         }
                     }
@@ -855,6 +947,7 @@ BarWidget {
 
                         Note { visible: root.cd.manual === true; text: "Set up outside this panel. Drives shows it and its folders but doesn't change its crypttab or fstab lines."; }
                         Note { visible: root.cd.manual === true && Model.targetIssue(root.cd) !== ""; text: Model.targetIssue(root.cd) }
+                        ActionRow { visible: Model.canPrepare(root.chosenDrive); op: "prepare" }
                         SectionHead { visible: (root.cd.folders || []).length > 0; label: "FOLDERS ON THIS DRIVE"; trail: "" }
                         Repeater {
                             model: root.manualRows.length
@@ -1046,7 +1139,21 @@ BarWidget {
                         Note { visible: root.targets.length === 0 && Model.blockedTargets(root.storage).length === 0; text: "No drive can take a folder yet. Set up a drive that unlocks with Omarchy first." }
                         Repeater {
                             model: root.targets.length === 0 ? Model.blockedTargets(root.storage).length : 0
-                            Note { required property int index; text: Model.blockedTargets(root.storage)[index].issue }
+                            Card {
+                                required property int index
+                                readonly property var b: Model.blockedTargets(root.storage)[index] || ({})
+                                Text { width: parent.width; text: (b.title || "") + " (" + (b.mount || "") + ")"; color: root.ink; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                                Text { width: parent.width; text: b.issue || ""; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                                Button {
+                                    visible: b.prepare === true
+                                    bordered: true
+                                    foreground: root.ink
+                                    fontFamily: root.face
+                                    text: "󰒓  Prepare " + (b.mount || "") + " for moves…"
+                                    enabled: root.canWrite
+                                    onClicked: root.prepareDrive(b.mountpoint)
+                                }
+                            }
                         }
                         SectionHead { label: "WHAT HAPPENS"; trail: "" }
                         Repeater {
@@ -1199,6 +1306,11 @@ BarWidget {
                 if (r.drive && r.drive.name === name) { if (r.fix.action !== "reconnect") return "unavailable"; root.selectedKey = r.key; root.act("reconnect"); return "ok"; }
             }
             return "missing";
+        }
+        function prepare(mountpoint: string): string {
+            var b = Model.blockedTargets(root.storage).filter(function(x) { return x.mountpoint === mountpoint && x.prepare; });
+            if (!b.length) return "unavailable";
+            root.prepareDrive(mountpoint); return "ok";
         }
         function serial(fragment: string): string { serialField.text = fragment; return root.serialOk ? "matched" : "rejected"; }
         function addNext(): string { return root.addNext() ? "ok" : "rejected"; }
