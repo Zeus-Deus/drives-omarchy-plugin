@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 function model(){const file=path.join(__dirname,'../Model.js');assert.ok(fs.existsSync(file),'display and state model is not implemented');let c={};vm.createContext(c);vm.runInContext(fs.readFileSync(file,'utf8'),c);return c;}
 test('confirmation fragments cannot inject controls/bidi or extra lines',()=>{const m=model();assert.equal(m.display('disk\n\u202e name\t'),'disk name');});
 test('default destructive selection is Cancel and wrong serial cannot proceed',()=>{const m=model();assert.equal(m.canProvision({serial:'TESTNEW0002',system:false,selectable:true},'Y003'),false);assert.equal(m.canProvision({serial:'TESTNEW0002',system:false,selectable:true},'0002'),true);assert.equal(m.canProvision({serial:'TESTNEW0002',system:true,selectable:true},'0002'),false);});
-test('wheel is immediate and clamped at both ends',()=>{const m=model();assert.equal(m.scroll(0,-120,0,1000,200,28),84);assert.equal(m.scroll(790,-120,0,1000,200,28),800);assert.equal(m.scroll(20,120,0,1000,200,28),0);});
+test('wheel is immediate and clamped at both ends',()=>{const m=model();assert.equal(m.scroll(0,-120,0,1000,200,150),150);assert.equal(m.scroll(790,-120,0,1000,200,150),800);assert.equal(m.scroll(20,120,0,1000,200,150),0);assert.equal(m.scroll(100,-120,-37,1000,200,150),137);});
 function configured(){return {state:'ready',name:'archive',serial:'GUIARCHIVE0002',byId:'/dev/disk/by-id/GUIARCHIVE0002',mountpoint:'/data2'};}
 function present(){return {serial:'GUIARCHIVE0002',byId:'/dev/disk/by-id/GUIARCHIVE0002',state:'mounted',encrypted:true,system:false,mounts:[{target:'/data2',fstype:'btrfs',options:'rw,relatime'}],usage:[]};}
 for(const [label,disks] of [
@@ -145,6 +145,6 @@ test('space list shows 12 then all, with live progress and a typed folder',()=>{
   assert.match(m.typedFolder('/etc','/home/u').why,/outside your home/);
   assert.equal(m.typedFolder('','/home/u').why,'');});
 test('wheel: high-resolution notches add up, and a resting pointer cannot grab the highlight',()=>{const m=model();
-  let y=0;for(let i=0;i<8;i++)y=m.scroll(y,-15,0,1000,200,28);assert.equal(y,84);
+  let y=0;for(let i=0;i<8;i++)y=m.scroll(y,-15,0,1000,200,150);assert.equal(y,150);
   const qml=fs.readFileSync(path.join(__dirname,'../Panel.qml'),'utf8');
   assert.match(qml,/pointerGate\.moved\(row, mouse\)/);assert.doesNotMatch(qml,/onContainsMouseChanged:[^\n]*root\.cursor/);});

@@ -9,8 +9,10 @@ function bytes(n) {
 function canProvision(disk,fragment) {
     return !!disk && disk.selectable===true && !disk.system && String(disk.serial).length>=4 && fragment===String(disk.serial).slice(-4);
 }
-function scroll(y,angle,pixel,content,height,pitch) {
-    return Math.max(0,Math.min(Math.max(0,content-height),y+(pixel?-pixel:-angle/120*pitch*3)));
+// step is the themed per-notch distance, like the other plugin handlers.
+// Touchpad pixel deltas retain their 1:1 movement.
+function scroll(y,angle,pixel,content,height,step) {
+    return Math.max(0,Math.min(Math.max(0,content-height),y+(pixel?-pixel:-angle/120*step)));
 }
 function fullest(disks) {
     var max=0;for(var i=0;i<disks.length;i++)if(!disks[i].system)for(var j=0;j<(disks[i].usage||[]).length;j++)max=Math.max(max,disks[i].usage[j].percent||0);

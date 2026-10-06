@@ -25,13 +25,28 @@ omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml
 ```
 
-Current results (VM, 2026-10-06): 154 Python passed as root; the 9 native GTK
+Current results (VM, 2026-10-06): 155 Python passed as root; the 9 native GTK
 window tests skip there and pass separately as the desktop user with
 `DRIVES_GTK_TEST=1 WAYLAND_DISPLAY=wayland-1 python3 -m pytest
 tests/test_agent_gtk.py` (9 passed). 48 Node passed, plugin validates.
 qmllint has no errors; the remaining warnings are the kit's usual
 `Style.font.*`/`Color.*` missing-property noise and the `onExited`
 signal-parameter type.
+
+### Wheel scrolling
+
+Match the working PassPage wheel handler: one mouse notch moves three
+two-line rows (`(Style.spacing.rowPaddingX + Style.space(38)) * 3`, normally
+150 px), not three short popup rows (84 px). Cancel any kinetic flick before
+stepping `contentY`, explicitly accept Mouse and TouchPad, and pass touchpad
+pixel deltas through unchanged. Keep the pointer movement gate: a stationary
+pointer must not take the cursor as rows scroll under it.
+
+`tests/test_wheel_qml.py` extracts the actual panel WheelHandler and themed
+step expression into Qt Quick Test, imports the real Model.js, and exercises
+single/rapid/high-resolution notches, kinetic cancellation and both bounds.
+It runs offscreen, without controlling the user's desktop. These tests and a
+clean VM panel load do not establish physical-mouse feel on every device.
 
 The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 `F_SEAL_*` (the system Python has it; some uv builds do not).

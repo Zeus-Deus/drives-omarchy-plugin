@@ -142,6 +142,9 @@ BarWidget {
     readonly property color ink: bar ? bar.foreground : Color.foreground
     readonly property color dim: Qt.darker(ink, 1.4)
     readonly property string face: Style.font.family
+    // Match the working PassPage list: three two-line rows per mouse notch,
+    // not three short popup rows. Touchpad pixel deltas still pass through.
+    readonly property real wheelStep: (Style.spacing.rowPaddingX + Style.space(38)) * 3
     function toneColor(tone) { return tone === "ok" ? Color.accent : (tone === "bad" ? Color.urgent : dim); }
     function segColor(i) { return Util.alpha(Color.accent, [1.0, 0.68, 0.46, 0.3][Math.max(0, i) % 4]); }
 
@@ -554,8 +557,15 @@ BarWidget {
                 contentWidth: width
                 contentHeight: content.implicitHeight
                 boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
                 WheelHandler {
-                    onWheel: function(event) { flick.contentY = Model.scroll(flick.contentY, event.angleDelta.y, event.pixelDelta.y, flick.contentHeight, flick.height, Style.spacing.popupRowHeight); event.accepted = true; }
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: function(event) {
+                        flick.cancelFlick()
+                        flick.contentY = Model.scroll(flick.contentY, event.angleDelta.y, event.pixelDelta.y, flick.contentHeight, flick.height, root.wheelStep)
+                        event.accepted = true
+                    }
                 }
 
                 Column {
