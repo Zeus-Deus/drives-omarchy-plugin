@@ -71,8 +71,11 @@ class Server:
             from helper.maintenance import LATCH,RUNTIME
             # Withdrawing this session's own request is the one write allowed
             # while it is armed; MoveManager.cancel_request re-checks it exactly.
-            if os.path.lexists(RUNTIME) or (os.path.lexists(LATCH) and method!='CancelRestart'):
+            if os.path.lexists(RUNTIME):
                 raise Failure('maintenance controls require inspection before normal storage operations')
+            if os.path.lexists(LATCH) and method!='CancelRestart':
+                from helper.moves import armed_refusal
+                raise armed_refusal()
             self.c.journal('jobs',job['id'],job)
             self.jobs=(self.jobs+[job])[-24:]
             for old in self.c.records('jobs'):

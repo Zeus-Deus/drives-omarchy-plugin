@@ -204,6 +204,19 @@ def tree_stats(path,uid=None,progress=None):
     if split:raise Failure(str(len(split))+' file(s) here also have a name outside this folder (hard links), e.g. '+_shown(split[0])+'. Moving would split each into two separate copies')
     return {'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
 
+WAITING_TEXT='another folder is already waiting for the next restart; one folder moves per restart, so restart first and then move this one'
+INSPECT_TEXT='maintenance controls require inspection before normal storage operations'
+
+
+def armed_refusal():
+    """Why a normal storage operation must wait: a valid armed request is
+    simply a folder waiting for the restart; anything else needs inspection."""
+    from helper.maintenance import latch_request
+    try:latch_request()
+    except Exception:return Failure(INSPECT_TEXT)
+    return Failure(WAITING_TEXT)
+
+
 class MoveManager:
     def __init__(self,common,uid=None,isolated=False,progress=None):
         # isolated: running inside drives-helper.service, whose namespace keeps
@@ -312,7 +325,8 @@ class MoveManager:
             if any(p and (p==src or p.startswith(src+'/') or src.startswith(p+'/')) for p in paths):raise Failure('this folder overlaps an existing move; inspect it first')
     def controls(self):
         from helper.maintenance import LATCH,RUNTIME
-        if os.path.lexists(LATCH) or os.path.lexists(RUNTIME):raise Failure('maintenance controls require inspection before normal storage operations')
+        if os.path.lexists(RUNTIME):raise Failure(INSPECT_TEXT)
+        if os.path.lexists(LATCH):raise armed_refusal()
     def admit(self,src,destMount,allow_preparation=False,exclude=None):
         self.controls();self.conflicts(src,exclude)
         stats,topology,uid,needs,identities=self._preflight(src,destMount,allow_preparation)

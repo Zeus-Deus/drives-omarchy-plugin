@@ -128,3 +128,18 @@ def test_restart_inspects_interrupted_jobs_without_replaying(tmp_path):
     server=Server(c)
     assert server.jobs[0]['state']=='paused'
     assert c.read('jobs',id)['state']=='running', 'startup must inspect, not mutate or resume'
+
+
+def test_valid_waiting_request_refuses_in_plain_words(tmp_path,monkeypatch):
+    import json
+    from helper.common import Common,Failure
+    from helper.service import Server
+    from helper import maintenance
+    c=Common(tmp_path/'state');server=Server(c)
+    latch=tmp_path/'latch';monkeypatch.setattr(maintenance,'LATCH',latch);monkeypatch.setattr(maintenance,'RUNTIME',tmp_path/'runtime')
+    value={'version':1,'moveId':'a'*32,'action':'continue','armedBootId':'11111111-1111-1111-1111-111111111111'}
+    monkeypatch.setattr(maintenance,'control_json',lambda p,*a:value)
+    latch.write_text(json.dumps(value))
+    with pytest.raises(Failure,match='already waiting for the next restart; one folder moves per restart'):
+        server.schedule('StartMove',('/unused','/unused'),0)
+    assert server.jobs==[] and not server.worker_lock.locked()

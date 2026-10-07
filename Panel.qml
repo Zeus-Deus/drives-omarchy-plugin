@@ -125,7 +125,7 @@ BarWidget {
             else out.push({kind: "opt", id: "auto"}, {kind: "opt", id: "manual"}, {kind: "opt", id: "erase"}, {kind: "act", id: "provision"});
         } else if (view === "move") {
             targets.forEach(function(t) { out.push({kind: "target", id: t.mountpoint}); });
-            out.push({kind: "act", id: "review"});
+            out.push({kind: "act", id: restartArmed ? "restart" : "review"});
         } else if (view === "resume" && chosenMove) {
             Model.moveActions(chosenMove, pendingRestart).forEach(function(op) { out.push({kind: "act", id: op}); });
         } else if (view === "progress") {
@@ -234,6 +234,7 @@ BarWidget {
     // Start the safety check for the current folder/drive, quietly doing
     // nothing when the input is incomplete (no error banner for half-typed paths).
     function autoReview() {
+        if (restartArmed) return;
         if (!Model.typedFolder(folderField.text, home).path) return;
         if (!targets.some(function(t) { return t.mountpoint === moveTarget; })) return;
         reviewMove();
@@ -326,7 +327,7 @@ BarWidget {
             && targets.some(function(t) { return t.mountpoint === a.destMount; });
     }
     function reviewMove() {
-        if (!ownsInteraction || view !== "move" || !canWrite) return;
+        if (!ownsInteraction || view !== "move" || !canWrite || restartArmed) return;
         if (!seamlessMoves) { service.error = "Update the storage helper to use seamless folder moves. Run: sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh — then reopen Drives."; return; }
         var typedSource = Model.typedFolder(folderField.text, home);
         if (!typedSource.path) { service.error = typedSource.why || "Choose a folder inside your home."; folderField.forceActiveFocus(); return; }
@@ -1355,7 +1356,17 @@ BarWidget {
                             text: "Scheduling the move · Omarchy may ask for administrator authorization. Preparing the destination (if you agreed) and scheduling the next restart are one step."
                             color: root.ink
                         }
+                        Note {
+                            visible: root.restartArmed
+                            text: Model.waitingNote(root.storage)
+                            color: root.ink
+                        }
                         ActionRow {
+                            visible: root.restartArmed
+                            op: "restart"
+                        }
+                        ActionRow {
+                            visible: !root.restartArmed
                             op: "review"
                             title: root.assessment && root.assessment.state === "failed" ? "Check again" : (root.assessment && root.assessment.state === "review" ? "Review move…" : (root.assessment && root.assessment.state === "running" ? "Checking…" : "Check & review move…"))
                             enabled: root.canWrite && root.seamlessMoves && root.moveSource !== "" && root.moveTarget !== "" && (!root.assessment || root.assessment.state !== "running")

@@ -454,6 +454,16 @@ function overviewMeta(snapshot) {
 // Total size of the data drives that are present, for the DATA header.
 function dataTotal(snapshot){return compact(dataDrives(snapshot).reduce(function(a,r){return a+((r.disk&&r.disk.size)||0);},0));}
 // Hero meta for one move: "Moved · on /data", "Ready to move · to /data2".
+// One restart handles one folder. When a request is armed, the Move folder
+// screen says so up front instead of running a check the helper must refuse.
+function waitingNote(snapshot) {
+    var p=snapshot&&snapshot.restartPending;
+    if(!p||p.valid!==true)return "";
+    var m=(snapshot.moves||[]).filter(function(x){return x.id===p.moveId;})[0];
+    var what=m?shortPath(m.source):"Another folder";
+    var verb=p.action==="rollback"?" is waiting to be undone":p.action==="return"?" is waiting to move back":" is already waiting to move";
+    return what+verb+" at the next restart. One folder moves per restart: restart first, then move this one.";
+}
 function moveMeta(m,pending) {
     var stage=moveStage(m,pending),done=["moved","moved-await-reboot","cleaned"].indexOf(stage)>=0;
     if(stage==="returned"||stage==="return-on-restart")return moveText(m,pending)[0]+" · back to "+display(m.sourceMount||"original filesystem");

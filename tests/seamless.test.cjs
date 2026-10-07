@@ -388,3 +388,12 @@ test('smartmontools install is a fixed Omarchy command in a visible terminal',()
     // No privileged program is ever an argv element the panel executes.
     assert.doesNotMatch(source,/"(pkexec|sudo|pacman|yay)"/);
 });
+
+test('a folder already waiting for the restart is named before any check runs',()=>{
+    const m=model();
+    const snap={restartPending:{valid:true,moveId:'a',action:'continue'},moves:[{id:'a',source:'/home/u/.hermes'}]};
+    assert.equal(m.waitingNote(snap),'~/.hermes is already waiting to move at the next restart. One folder moves per restart: restart first, then move this one.');
+    assert.match(m.waitingNote({restartPending:{valid:true,moveId:'a',action:'rollback'},moves:snap.moves}),/waiting to be undone/);
+    assert.equal(m.waitingNote({restartPending:null,moves:[]}),'');
+    assert.equal(m.waitingNote({restartPending:{valid:false},moves:[]}),'','an invalid request is not described as waiting');
+});
