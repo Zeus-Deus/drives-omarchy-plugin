@@ -25,11 +25,24 @@ omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml
 ```
 
-Current results (VM, 2026-10-06): 155 Python passed as root; the 9 native GTK
+Latest installed Move back checkpoint (VM): **445 Python passed as root, 9
+GTK tests skipped; 98 Node passed.** The skipped GTK source is unchanged from
+the earlier separate native-widget run below. Installed tests proved latest
+files returning after deletion of the original copy, preserving edits,
+deletions, SQLite contents, modes, xattrs, hardlinks and literal symlinks.
+Two queued cuts (copying → durable pause, and exchanged → durable completion)
+recovered automatically: the pause did not replay and completion did not get
+stuck behind its surviving request. The actual loaded review defaulted to
+Cancel; administrator denial and active-file refusal changed no data. These
+are storage/protocol/native-state results, not final visual sign-off.
+
+Previous seamless-move checkpoint, before Move back (VM): 290 Python passed as root; the 9 native GTK
 window tests skip there and pass separately as the desktop user with
 `DRIVES_GTK_TEST=1 WAYLAND_DISPLAY=wayland-1 python3 -m pytest
-tests/test_agent_gtk.py` (9 passed). 48 Node passed, plugin validates.
-qmllint has no errors; the remaining warnings are the kit's usual
+tests/test_agent_gtk.py` (9 passed; the agent's source is unchanged since that
+separate run). 91 Node passed, plugin validates.
+qmllint has no errors; 40 warnings versus 36 baseline, including the dynamic
+`bar.activePopout` member that the real shell provides. Other warnings are the kit's usual
 `Style.font.*`/`Color.*` missing-property noise and the `onExited`
 signal-parameter type.
 
@@ -85,7 +98,11 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
   real files in the guest. The test asserts this.
 - **Boot screen.** `plymouth quit` once hung, timed the splash unit out,
   failed the maintenance target, and the worker refused the move. Every
-  splash step is bounded and fits inside the unit timeout.
+  splash step is bounded and fits inside the unit timeout. Bounded quit/wait
+  plus TERM also left an initramfs daemon alive during a later recovery;
+  the owned maintenance-only unit now escalates to KILL. Admission still
+  independently rejects residual processes. No vendor normal-boot unit is
+  changed or masked.
 - **udiskie** (autostarted by Omarchy) prompts for any locked LUKS partition.
   Drives volumes carry `UDISKS_IGNORE=1`; check for that rule if a password
   dialog ever appears for a Drives disk.
@@ -105,11 +122,22 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 | Crash at copying, verifying, placeholder, fstab, quarantine-prepared | Original restored unchanged, move paused. |
 | Crash during Undo | Undo finished on the next boot. |
 | Undo after a new file was added | Refused; new file kept. |
-| Open file, unreadable subtree, FIFO, `.ssh` inside, `~/.config`, outside hardlink, too little space | Each refused with a clear message. |
+| Active fd/cwd/mmap, unreadable subtree, FIFO, nested mount, outside hardlink, too little space | Refused with a clear message; closed-app retry succeeds. Names such as `.config` or `.ssh` no longer decide admission. |
 | Destination unplugged before the maintenance boot | "Drive not connected"; nothing changed; folder still usable. |
 | Drive re-plugged after boot | Reconnect from the panel brings back the drive and its moved folder; checksum identical. |
 | Keyfile removed (reinstall), restart | Helper starts, no stray password dialog, wrong passphrase refused, recovery passphrase restores the drive and both moved folders. |
 | Hung boot screen | Previously cancelled a move; fixed and re-proven. |
+| Native assessed move: Cancel-default review, denied administrator prompt, integrated preparation + scheduling | Cancel/denial changed nothing. One ScheduleMove prepared the TEST drive root and armed the next restart; no separate Prepare/Resume step. |
+| Dormant SQLite/settings folder under `.config` | Restarted move, opened at its familiar path, exact hashes/modes/ACL/xattr/hardlinks/symlinks preserved. |
+| Public-mode profile inside a private home, private destination wrapper | Other UID denied on the direct SSD path with a readable sibling control; owner could read the familiar bind path. |
+| Preparing a private drive root | Original owner retained read/traverse access, other UID stayed denied, top-level writes blocked, existing child owners/modes unchanged. |
+| Installed failure after preparation but before destination creation | Plan offered cancellation; Cancel + reassess succeeded without restarting the failed helper, and the original stayed unchanged. |
+| Private-layout power cut at copying, then explicit Continue | Original restored unchanged and move paused; later restart completed, Delete old copy preserved live data. |
+| Private-layout Undo | Original and metadata restored, wrapper removed. Two earlier profile reruns stalled in subsequent stock normal-boot Plymouth and required recovery resets. A later plain-folder follow-up completed Undo and its automatic normal reboot without a recovery reset; this does not establish a fix for the earlier intermittent stall. |
+| Move back after edits/deletions and Delete old copy | Latest manifest matched locally; SQLite reopened, links/xattrs/owners/modes preserved, SSD retained. A cut after durable completion recovered its request. |
+| Interrupted Move back, two cuts at copying and durable pause | SSD remained active, partial staging retained, no automatic new copy; a fresh request remained necessary. Latest installed rerun reached normal desktop without a recovery reset. |
+| Return exchange followed by a cut after durable completion | Finished locally, owned bind removed, copies retained, latch cleared; normal desktop started automatically. |
+| Returned source selected again | Ordinary caller assessment and a new move succeeded; retained destinations remained protected. |
 
 ## Not verified
 
@@ -125,3 +153,57 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 - Folders of hundreds of gigabytes, and a drive filling up mid-copy (the 1.2×
   free-space check runs before the copy).
 - Manual-unlock drives as move destinations (refused by design).
+- Universal third-party app-profile compatibility, arbitrary system/service
+  storage moves, already-bound-folder retargeting, and OS-disk destinations.
+- Final screenshot/three-theme comparison after the security hardening:
+  screen capture was denied by the test-session policy. Earlier native flow
+  screenshots and SSD-first IPC state are retained as separate evidence.
+- The root cause of two earlier intermittent normal-startup stalls after
+  private-layout profile Undo. Logs show `plymouth-start.service` timed out.
+  A subsequent normal baseline reboot, move and plain-folder Undo boot passed
+  without changing packaged Plymouth services. Keep earlier failures separate
+  from those successful follow-ups; do not claim the intermittent failure fixed.
+  A subsequent pre-escalation return-pause run also reached safe storage but
+  stalled in stock Plymouth. Separately, completed-Undo recovery was correctly
+  blocked by a surviving initramfs daemon. The maintenance-only KILL escalation
+  addresses that verified residual-daemon failure; later double-cut runs passed,
+  but do not claim that proves every earlier normal-startup stall fixed.
+
+## Seamless-move maintenance rules
+
+- Assess real ownership/use/storage conditions, not profile names. Keep
+  source/ancestor symlink refusal, but preserve child symlinks literally;
+  rsync must not copy their external targets. Preserve path bytes when a row
+  selects a folder, including meaningful trailing spaces.
+- Source permission copying must not remove effective ancestor privacy. New
+  moves use a root-private mode-0700 wrapper and bind only its `content` child;
+  record and validate both identities, including effective inherited ACL masks.
+- Preparation must not make a private drive public. Preserve existing effective
+  read/traverse grants and group identity, remove non-root writes, and freeze
+  masked grants before adding the former owner to the access ACL.
+- A scheduling failure is not a dead-end journal. Independently validate
+  untouched pre-switch cancellation, never adopt/delete unknown destinations,
+  retain permanent preparation, and release conflicts after cancellation.
+- Read topology before probing a missing drive's private paths, so Status
+  does not trigger an automount. Compare reboot-persistent parent identity
+  using UUID/inode/subvolume, not raw `st_dev`.
+- Keep negative offline fixtures' restoration/config writes stubbed too.
+  An assertion raised inside the worker's try block enters its recovery path.
+- Ambiguous recovery and invalid requests retain the persistent normal-startup
+  barrier. Never rename the latch away or boot profile consumers on an uncertain
+  source merely to avoid a blank maintenance screen.
+- Legacy flat-copy plans cannot Continue into the unwrapped layout. Preserve
+  inspection/Undo of completed legacy moves, but cancel and reassess untouched
+  old plans rather than reintroducing direct SSD-path confidentiality loss.
+- Move back copies current SSD content, not the frozen original. Stage privately
+  on the original filesystem/subvolume, verify, exchange the owned placeholder
+  atomically, and remove only the owned bind stanza. Retain all copies; once
+  fstab removal is durably established, local edits are authoritative.
+- Consume the validated action/armed-boot intent in the same durable journal
+  write as a completed or safely paused outcome. A surviving latch dispatches
+  proof-and-cleanup only, never a new copy. Permit the matching completed state
+  through request validation; re-prove authoritative storage before clearing the
+  startup barrier. Clear stale attention only after that proof succeeds.
+- Test new Move back root components only inside the guest with
+  `DRIVES_VM_TESTING=1`; nonprivileged components and mocked mounts are not
+  production polkit/bind/reboot/crash qualification.

@@ -8,7 +8,7 @@ It refuses to run outside a KVM guest and only touches TEST* serial disks.
   reconnect <name>                         ReconnectDrive: re-plugged drive, its own keyfile
   prepare <mountpoint>                     PrepareDrive: root-own a hand-made drive's top folder
   plan <src> <destMount>                   StartMove (normal session: plan only)
-  request <moveId> continue|rollback       Resume/RollbackMove: arm the next-boot request
+  request <moveId> continue|rollback|return  Resume/Rollback/MoveBack: arm the next-boot request
   cancel-request <moveId>                  CancelRestart
   cancel <moveId>                          CancelMove (discard the planned destination)
   delete <moveId>                          DeleteOldCopy
@@ -70,13 +70,17 @@ def main(argv):
         result=submit('ReconnectDrive',(record['id'],))
     elif op=='prepare':result=submit('PrepareDrive',(argv[1],))
     elif op=='plan':result=submit('StartMove',(argv[1],argv[2]))
-    elif op=='request':result=submit('ResumeMove' if argv[2]=='continue' else 'RollbackMove',(argv[1],))
+    elif op=='request':
+        methods={'continue':'ResumeMove','rollback':'RollbackMove','return':'MoveBack'}
+        assert argv[2] in methods,'invalid maintenance action'
+        result=submit(methods[argv[2]],(argv[1],))
     elif op=='cancel-request':result=submit('CancelRestart',(argv[1],))
     elif op=='cancel':result=submit('CancelMove',(argv[1],))
     elif op=='delete':result=submit('DeleteOldCopy',(argv[1],))
     elif op=='status':result=status()
     elif op=='crash-at':
-        stage=argv[1];assert stage in ('quarantining','quarantine-prepared','copying','verifying','switching','placeholder','fstab','rolling-back')
+        stage=argv[1];stages=stage.split(',')
+        assert 1<=len(stages)<=8 and all(s in ('quarantining','quarantine-prepared','copying','verifying','switching','placeholder','fstab','rolling-back','switched','rolled-back','return-preparing','return-store','return-copying','return-verifying','return-switching','return-exchanged','return-finishing','return-fstab','returned','return-paused') for s in stages)
         p=pathlib.Path('/var/lib/drives-helper/qa-crash-at');p.write_text(stage);p.chmod(0o600);result={'armed':stage}
     else:raise SystemExit(__doc__)
     print(json.dumps(result,ensure_ascii=True))

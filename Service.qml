@@ -15,43 +15,63 @@ Item {
     property var snapshot: ({disks:[],moves:[],drives:[],jobs:[],helperAvailable:false})
     property string error: ""
     property var rates: ({})
-    readonly property bool mutating: busy && request.op !== "status"
+    readonly property bool mutating: (busy && request.op !== "status") || pending !== null
     readonly property string bridgePath: decodeURIComponent(Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//,""))
     readonly property string agentPath: decodeURIComponent(Qt.resolvedUrl("helper/agent.py").toString().replace(/^file:\/\//,""))
     signal launching()
-    signal finished(var result)
+    property int requestEpoch: 0
+    property bool timedOut: false
+    signal finished(var result, var req)
 
     function refresh() { if (opened && !busy) submit({op:"status"}); }
     function submit(req) {
         if (busy) {
-            if (request.op === "status" && req.op !== "status") {
+            if (request.op === "status" && req.op !== "status" && pending === null) {
                 pending = req; suppress = true;
                 if (worker.running) worker.signal(15);
+                return true;
             }
-            return;
+            return false;
         }
+        if (worker.running) return false;
+        requestEpoch++; timedOut = false;
         request = req; busy = true; suppress = false;
         worker.command = Model.boundedArgv(["/usr/bin/python3","-B",bridgePath]);
         deadline.interval = req.op === "status" ? 10000 : 150000;
         deadline.restart(); worker.stdinEnabled=true; worker.running = true;
+        return true;
     }
     function complete(code) {
         if (!busy) return;
-        deadline.stop(); busy = false;
+        var req = request, result;
+        if (timedOut) code = -1;
+        deadline.stop(); busy = false; worker.stdinEnabled = false;
         if (!suppress) {
-            if (code !== 0) error = code === 90 ? "Storage response exceeded the safe size limit." : "Storage bridge could not run (exit " + code + ").";
+            if (code !== 0) result = {ok:false, error:code === 90 ? "Storage response exceeded the safe size limit." : "Storage bridge could not run (exit " + code + ")."};
             else {
                 try {
-                    var result = JSON.parse(output.text);
-                    if (!result.ok) error = Model.display(result.error);
-                    else if (request.op === "status") { rates=Model.ioRates(snapshot,result); snapshot=result; loaded=true; }
-                    else { error=""; finished(result); }
-                } catch(e) { error="Invalid storage bridge response."; }
+                    result = JSON.parse(output.text);
+                    if (!result || typeof result.ok !== "boolean") throw new Error("invalid envelope");
+                } catch(e) { result = {ok:false, error:"Invalid storage bridge response."}; }
+            }
+            if (req.op === "status") {
+                if (result.ok) { rates=Model.ioRates(snapshot,result); snapshot=result; loaded=true; }
+                else error=Model.display(result.error);
+            } else {
+                // An obsolete assessment must not leak an error into another view.
+                if (req.op !== "assess_move") error=result.ok ? "" : Model.display(result.error);
+                finished(result, req);
             }
         }
         suppress = false;
         var next=pending;pending=null;
         if(next) Qt.callLater(function(){root.submit(next);});
+    }
+    function timeoutBridge() {
+        if (!busy) return;
+        timedOut = true;
+        if (worker.running) worker.signal(9);
+        else complete(-1);
     }
     // ---- folder sizes (read-only du, as this user, streamed line by line) ----
     // Measuring a full home folder can take a minute or two, so it runs in its
@@ -102,7 +122,7 @@ Item {
     Timer { interval:1000; repeat:true; running:root.opened; onTriggered:root.refresh(); }
     Timer {
         id:deadline
-        onTriggered: { if(worker.running)worker.signal(9);root.complete(-1); }
+        onTriggered: root.timeoutBridge()
     }
     Process {
         id:worker
@@ -110,6 +130,6 @@ Item {
         stdout: StdioCollector { id:output; waitForEnd:true }
         onStarted: { worker.write(JSON.stringify(root.request)+"\n");worker.stdinEnabled=false; }
         onExited: function(code,status) { root.complete(code); }
-        onRunningChanged: if(!running && root.busy) Qt.callLater(function(){if(!worker.running && root.busy)root.complete(-1);});
+        onRunningChanged: if(!running && root.busy) { var epoch = root.requestEpoch; Qt.callLater(function(){if(!worker.running && root.busy && root.requestEpoch === epoch)root.complete(-1);}); }
     }
 }

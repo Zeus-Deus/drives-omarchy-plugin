@@ -12,15 +12,16 @@ paused and returns to a normal boot; the user decides what happens next.
 An interrupted Undo finishes restoring the original (the safe direction).
 Anything ambiguous keeps the boot gate closed and both copies.
 """
-import json,os,pathlib,re,stat,subprocess,sys,time
-from helper.common import Common,Failure,run,mount_rows,mount_for,boot_id,escape_fstab,read_regular
+import ctypes,json,os,pathlib,re,stat,subprocess,sys,time,uuid
+from helper.common import Common,Failure,run,mount_rows,mount_for,boot_id,escape_fstab,read_regular,atomic
 from helper import maintenance
 from helper.moves import (MoveManager,anchored_tree,delete_tree_fd,durable_directory,identity,
-    identity_fd,safe_path,tree_stats)
+    identity_fd,private_container_fd,safe_path,tree_stats)
 from helper.quarantine import closed_hardlinks,move_original,prepare_store,private_store_fd
 
 OFFLINE={'quarantining','copying','verifying','switching','rolling-back'}
 QA_CRASH=pathlib.Path('/var/lib/drives-helper/qa-crash-at')
+RETURN_ROOT=pathlib.Path('/.drives-return')
 
 
 class Unsafe(Failure):
@@ -47,9 +48,11 @@ def qa_crash(stage):
     file in a KVM guest; it is consumed once and simulates a power cut."""
     try:
         if not QA_CRASH.is_file() or QA_CRASH.stat().st_uid!=0:return
-        if read_regular(QA_CRASH,64).decode().strip()!=stage:return
+        pending=read_regular(QA_CRASH,256).decode().strip().split(',')
+        if not pending or pending[0]!=stage:return
         if run(['/usr/bin/systemd-detect-virt']).strip()!=b'kvm':return
-        QA_CRASH.unlink();durable_directory(str(QA_CRASH.parent))
+        if len(pending)>1:atomic(QA_CRASH,','.join(pending[1:]).encode(),0o600)
+        else:QA_CRASH.unlink();durable_directory(str(QA_CRASH.parent))
     except (OSError,Failure):return
     say('QA crash injection at '+stage)
     with open('/proc/sysrq-trigger','w') as trigger:trigger.write('b')
@@ -83,7 +86,16 @@ def diverged(original,dest):
 def fstab_line(j):
     # No automount on the bind itself: it mounts at boot (nofail, so boot never
     # waits) and the real mount state stays observable without touching it.
-    return escape_fstab(j['dest'])+' '+escape_fstab(j['source'])+' none bind,nofail,x-systemd.requires='+escape_fstab(j['destMount'])+' 0 0'
+    # nofail must not let profiles start on an empty placeholder while the
+    # bind is still queued. A failed/missing drive leaves the mode-000 guard.
+    return escape_fstab(j['dest'])+' '+escape_fstab(j['source'])+' none bind,nofail,x-systemd.before=systemd-user-sessions.service,x-systemd.requires='+escape_fstab(j['destMount'])+' 0 0'
+
+
+def consume_intent(j):
+    """Publish alongside the outcome, never in a later journal write."""
+    intent=j.get('maintenanceIntent')
+    if isinstance(intent,dict) and set(intent)=={'action','armedBootId'}:
+        j['maintenanceConsumed']=dict(intent)
 
 
 class Offline:
@@ -111,7 +123,7 @@ class Offline:
     def mount_destination(self,j):
         rows=mount_rows()
         if any(r['target']==j['destMount'] and r['fstype']!='autofs' for r in rows):
-            self.m.destination(j);return
+            self.m.destination(j,allow_removed=j['state']=='rolling-back');return
         entry=crypttab_key(j['destMapper'])
         mapper='/dev/mapper/'+j['destMapper']
         if not os.path.exists(mapper):
@@ -122,7 +134,7 @@ class Offline:
             run(['/usr/bin/cryptsetup','open','--key-file',entry['key'],device,j['destMapper']],timeout=180)
             run(['/usr/bin/udevadm','settle','--timeout=30'],timeout=40)
         run(['/usr/bin/mount','-t','btrfs','-o','compress=zstd:3,nodiscard',mapper,j['destMount']],timeout=120)
-        self.m.destination(j)
+        self.m.destination(j,allow_removed=j['state']=='rolling-back')
 
     def admitted(self,j,action):
         """Re-audit the whole system before every irreversible step."""
@@ -197,12 +209,13 @@ class Offline:
         write_owned(self.c,'fstab',j['id'],None)
         self.unbind(j);self.remove_placeholder(j);self.put_back(j);self.drop_store(j)
         if identity(j['source'])[1:]!=j['sourceIdentity'][1:]:raise Unsafe('restored original identity differs')
+        if 'destContainer' in j and os.path.lexists(j['destContainer']):self.m.private_destination(j)
         # Back to the pre-move situation: original in use, destination is only a
         # disposable seed, so Continue/Cancel/Start over are all safe again.
         j['restoredFrom']=j['state']
         j.pop('quarantine',None);j.pop('cutover',None);j.pop('verification',None);j['verified']=False
         j['backup']=j['source']+'.pre-move';j['interruptedState']='awaiting-maintenance'
-        self.m.stage(j,'paused');j['error']=reason;self.c.journal('moves',j['id'],j)
+        consume_intent(j);self.m.stage(j,'paused');j['error']=reason;self.c.journal('moves',j['id'],j)
 
     # --- Continue ----------------------------------------------------------------
     def continue_move(self,j):
@@ -215,9 +228,12 @@ class Offline:
             except BaseException as error:raise Unsafe('could not restore after interruption: '+str(error)[:200]) from error
             return 'restored after interruption'
         if j['state'] not in ('awaiting-maintenance','paused'):raise Failure('move is not waiting for maintenance')
+        if 'destContainer' not in j:raise Failure('legacy plan has no private destination wrapper; retain both copies, cancel the untouched plan and assess a new move')
         self.mount_source(j);self.mount_destination(j)
+        self.m.private_destination(j)
         self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
         self.admitted(j,'continue')
+        if any(r['target']==j['source'] or r['target'].startswith(j['source']+'/') for r in mount_rows()):raise Failure('nested or existing mount blocks the move')
         stats=tree_stats(j['source'],j['uid']);closed_hardlinks(j['source'])
         v=os.statvfs(j['destMount'])
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
@@ -232,7 +248,9 @@ class Offline:
             original=moved['path']
             # 2. Copy the frozen original.
             self.stage(j,'copying');say('copying '+str(stats['files'])+' files')
+            self.m.private_destination(j)
             run(['/usr/bin/rsync','-aHAXS','--numeric-ids','--delete','--',original+'/',j['dest']+'/'],timeout=24*3600,cap=8*1024*1024)
+            self.m.private_destination(j)
             # 3. Full verification: checksums, metadata and counts.
             self.stage(j,'verifying');say('verifying every file')
             verification=self.m.verify(original,j['dest'])
@@ -248,7 +266,7 @@ class Offline:
             self.m.smoke(j)
             run(['/usr/bin/umount',j['source']],timeout=60)
             j['cutover']={'bootId':self.boot,'time':time.time()};j['boot_id']=self.boot
-            self.m.stage(j,'switched')
+            consume_intent(j);self.m.stage(j,'switched');qa_crash('switched')
             say('moved; the familiar path now opens the encrypted drive')
             return 'moved'
         except Unsafe:raise
@@ -256,6 +274,201 @@ class Offline:
             try:self.restore(j,'Move stopped: '+str(error)[:200]+'. Your original folder is back in place.')
             except BaseException as again:raise Unsafe('could not restore after failure: '+str(again)[:200]) from error
             return 'restored after failure'
+
+    # --- Move latest data back (never Undo's frozen original) ----------------------
+    def return_root(self,j):
+        return RETURN_ROOT if j['sourceMount']=='/' else pathlib.Path(j['sourceMount'])/RETURN_ROOT.name
+
+    def mount_return_origin(self,j):
+        if j.get('sourceMount') not in ('/','/home'):raise Failure('unsupported original OS mount')
+        parent=str(safe_path(j['source']).parent)
+        if mount_for(parent,mount_rows())['target']!=j['sourceMount']:
+            if j['sourceMount']!='/home':raise Failure('original OS root is unavailable')
+            run(['/usr/bin/mount','/home'],timeout=120)
+        self.m.return_origin(j)
+
+    def prepare_return(self,j):
+        """New private staging; unknown leftovers are retained, never adopted."""
+        if os.geteuid()!=0:raise Failure('Move back worker requires root')
+        root=self.return_root(j)
+        maintenance.private_directory(root.parent)
+        try:
+            os.mkdir(root,0o700);os.chmod(root,0o700)
+            durable_directory(str(root.parent))
+        except FileExistsError:pass
+        with anchored_tree(str(root)) as (_,rootfd,_):
+            private_container_fd(rootfd)
+            parent=identity(str(pathlib.Path(j['source']).parent));rootid=identity_fd(rootfd)
+            if parent[0]!=rootid[0] or parent[2:]!=rootid[2:]:raise Unsafe('return staging filesystem or subvolume differs')
+            name=j['id']+'-'+uuid.uuid4().hex
+            os.mkdir(name,0o700,dir_fd=rootfd)
+            storefd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
+            try:
+                os.fchmod(storefd,0o700);saved=private_container_fd(storefd)
+                os.fsync(storefd);os.fsync(rootfd)
+            finally:os.close(storefd)
+        j['returnStore']={'path':str(root/name),'identity':saved,'rootIdentity':rootid}
+        self.c.journal('moves',j['id'],j);qa_crash('return-store')
+        content=j['returnStore']['path']+'/content'
+        os.mkdir(content,0o700);durable_directory(content);durable_directory(j['returnStore']['path'])
+        j['returnContentIdentity']=identity(content);self.c.journal('moves',j['id'],j)
+        return content
+
+    def return_store(self,j,allow_incomplete=False):
+        store=j['returnStore'];path=safe_path(store['path'])
+        root=self.return_root(j)
+        if path.parent!=root or not re.fullmatch(j['id']+'-[a-f0-9]{32}',path.name):raise Unsafe('return staging layout changed')
+        with anchored_tree(str(root)) as (_,fd,_):
+            actual=private_container_fd(fd)
+            if actual[1:]!=store['rootIdentity'][1:]:raise Unsafe('return staging root identity changed')
+        with anchored_tree(str(path)) as (_,fd,_):
+            actual=private_container_fd(fd)
+            if actual[1:]!=store['identity'][1:]:raise Unsafe('return staging identity changed')
+            parent=identity(str(pathlib.Path(j['source']).parent))
+            if actual[0]!=parent[0] or actual[2:]!=parent[2:]:raise Unsafe('return filesystem changed')
+            if set(os.listdir(fd))-{'content'}:raise Unsafe('unexpected data in return staging wrapper')
+            if not allow_incomplete:
+                expected=[j['returnContentIdentity'][1:]]
+                if j['state'] in ('return-switching','return-finishing'):expected.append(j['placeholderIdentity'][1:])
+                child=os.open('content',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                try:
+                    held=identity_fd(child)
+                    if held[1:] not in expected or held[0]!=actual[0] or held[2:]!=actual[2:]:raise Unsafe('return staging content identity changed')
+                finally:os.close(child)
+        return str(path/'content')
+
+    def return_placeholder(self,j,path=None):
+        path=j['source'] if path is None else path
+        with anchored_tree(path) as (_,fd,_):
+            info=os.fstat(fd)
+            if identity_fd(fd)[1:]!=j['placeholderIdentity'][1:] or info.st_uid!=0 or info.st_mode&0o777 or os.listdir(fd):
+                raise Unsafe('folder is not the recorded owned empty placeholder')
+
+    def pause_return(self,j):
+        # Before the exchange the SSD is authoritative. Do NOT automatically
+        # restart a partial copy, and never restore the frozen previous original.
+        if not self.m.bound(j):self.return_placeholder(j)
+        if j.get('returnStore'):
+            self.return_store(j,allow_incomplete=True)
+            j.setdefault('retainedReturnStages',[]).append(j['returnStore'])
+        for key in ('returnStore','returnContentIdentity','returnVerification'):j.pop(key,None)
+        state=j.get('returnFrom')
+        if state not in ('switched','cleaned'):raise Unsafe('return recovery has no original completed state')
+        consume_intent(j);self.m.stage(j,state)
+        j['error']='Move back was interrupted before switching. SSD data is still active; private staging was retained. Request Move back again to retry.'
+        self.c.journal('moves',j['id'],j);qa_crash('return-paused')
+        return 'return paused; SSD remains active'
+
+    def finish_return(self,j):
+        self.m.return_origin(j);self.admitted(j,'return')
+        self.m.return_admission(j,offline=True,full=False);self.unbind(j)
+        content=self.return_store(j)
+        self.m.changed(j['source'],j['returnContentIdentity'],j['sourceUUID'])
+        self.return_placeholder(j,content)
+        present=self.m.return_config(j,allow_removed=True)
+        # Before removal SSD stays authoritative, including edits after a failed
+        # return followed by a normal boot. After removal the complete local
+        # tree is authoritative: never overwrite new local edits with stale SSD.
+        if present:self.m.verify(j['dest'],j['source'])
+        elif j['state']!='return-finishing':raise Unsafe('fstab disappeared before the journalled finishing intent')
+        j['returnedIdentity']=identity(j['source']);self.stage(j,'return-finishing')
+        if present:
+            from helper.configwriter import write_owned
+            write_owned(self.c,'fstab',j['id'],None);qa_crash('return-fstab')
+        if self.m.return_config(j,allow_removed=True):raise Unsafe('owned bind remains configured')
+        j['returnedBoot']=self.boot;j['retainedSSD']=j['dest'];j.pop('needsAttention',None)
+        consume_intent(j);self.m.stage(j,'returned');qa_crash('returned');say('latest data returned; SSD and previous original copies were retained')
+        return 'returned'
+
+    def exchange_return(self,j,content):
+        """Atomic exchange: no missing-path window and no partial data exposed."""
+        self.m.return_admission(j,offline=True,full=False)
+        if content!=self.return_store(j):raise Unsafe('return staging path changed')
+        self.m.return_origin(j);self.m.private_destination(j)
+        self.unbind(j)
+        with anchored_tree(j['source']) as (parent,placeholder,name),anchored_tree(content) as (store,data,_):
+            held_parent=identity_fd(parent);self.m.changed(str(pathlib.Path(j['source']).parent),j['parentIdentity'],j['sourceUUID'])
+            p=identity_fd(placeholder);d=identity_fd(data);info=os.fstat(placeholder)
+            if p[1:]!=j['placeholderIdentity'][1:] or info.st_uid!=0 or info.st_mode&0o777 or os.listdir(placeholder):raise Unsafe('folder is not the recorded owned empty placeholder')
+            if private_container_fd(store)[1:]!=j['returnStore']['identity'][1:]:raise Unsafe('return staging identity changed at exchange')
+            if d[1:]!=j['returnContentIdentity'][1:] or p[0]!=d[0] or p[2:]!=d[2:]:raise Unsafe('return content identity or filesystem changed')
+            if held_parent[1:]!=j['parentIdentity'][1:]:raise Unsafe('original parent identity changed')
+            run(['/usr/bin/chattr','-i',j['source']])
+            self.m.changed(str(pathlib.Path(j['source']).parent),j['parentIdentity'],j['sourceUUID'])
+            entry=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            candidate=os.stat('content',dir_fd=store,follow_symlinks=False)
+            if (entry.st_dev,entry.st_ino)!=(p[0],p[1]) or (candidate.st_dev,candidate.st_ino)!=(d[0],d[1]):
+                raise Unsafe('placeholder or return content name changed before exchange')
+            rename=ctypes.CDLL(None,use_errno=True).renameat2
+            rename.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint];rename.restype=ctypes.c_int
+            if rename(store,b'content',parent,os.fsencode(name),2)!=0:raise Unsafe('atomic return exchange failed: '+os.strerror(ctypes.get_errno()))
+            os.fsync(parent);os.fsync(store)
+        qa_crash('return-exchanged')
+
+    def return_move(self,j):
+        if os.geteuid()!=0:raise Failure('Move back worker requires root')
+        if j['state']=='returned':return 'already returned'
+        self.mount_return_origin(j);self.mount_destination(j)
+        self.admitted(j,'return');self.m.return_admission(j,offline=True,full=j['state'] not in maintenance.RETURN_STATES)
+        try:
+            if j['state'] in ('return-preparing','return-copying','return-verifying'):return self.pause_return(j)
+            if j['state'] in ('return-switching','return-finishing'):
+                content=self.return_store(j)
+                self.unbind(j)
+                if identity(j['source'])[1:]==j['placeholderIdentity'][1:]:
+                    if j['state']!='return-switching' or not j.get('returnVerification'):raise Unsafe('return switch has no saved verification')
+                    self.m.changed(content,j['returnContentIdentity'],j['sourceUUID'])
+                    self.m.verify(j['dest'],content);self.admitted(j,'return')
+                    self.exchange_return(j,content)
+                return self.finish_return(j)
+            j['returnFrom']=j['state']
+            self.stage(j,'return-preparing');content=self.prepare_return(j)
+            self.stage(j,'return-copying');say('copying the latest SSD data back to the original disk')
+            self.m.private_destination(j);self.return_store(j)
+            run(['/usr/bin/rsync','-aHAXS','--numeric-ids','--delete','--',j['dest']+'/',content+'/'],timeout=24*3600,cap=8*1024*1024)
+            self.m.private_destination(j);self.return_store(j)
+            self.stage(j,'return-verifying')
+            j['returnVerification']=self.m.verify(j['dest'],content)
+            run(['/usr/bin/sync','-f',content],timeout=600)
+            self.c.journal('moves',j['id'],j)
+            self.admitted(j,'return');self.m.return_admission(j,offline=True,full=False)
+            self.stage(j,'return-switching');self.exchange_return(j,content)
+            return self.finish_return(j)
+        except Unsafe:raise
+        except BaseException as error:raise Unsafe('Move back interrupted; all copies retained: '+str(error)[:200]) from error
+
+    def complete_consumed(self,j,action):
+        """Re-prove authoritative storage, then clear a surviving latch only.
+
+        A paused operation must not become a fresh copy after a second cut.
+        Completion is not trusted merely because its journal says so.
+        """
+        try:
+            self.admitted(j,action)
+            if j['state']=='returned' and action=='return':
+                self.mount_return_origin(j)
+                self.m.changed(j['source'],j['returnedIdentity'],j['sourceUUID'])
+                if self.m.return_config(j,allow_removed=True):raise Unsafe('returned folder still has a configured bind')
+            elif j['state'] in ('switched','cleaned'):
+                self.mount_source(j);self.mount_destination(j);self.m.destination(j)
+                if not j.get('verified') or not self.m.return_config(j):raise Unsafe('active copy or owned bind cannot be established')
+                if not self.m.bound(j):self.return_placeholder(j)
+                return 'request already handled; SSD remains active'
+            elif j['state'] in ('rolled-back','paused','awaiting-maintenance','planned'):
+                self.mount_source(j)
+                self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
+                if j.get('parentIdentity'):self.m.changed(str(pathlib.Path(j['source']).parent),j['parentIdentity'],j.get('sourceUUID'))
+                from helper.moves import read_regular as read_config
+                for line in read_config('/etc/fstab',65536).decode().splitlines():
+                    fields=line.split()
+                    if not fields or fields[0].startswith('#') or len(fields)<2:continue
+                    target=re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),fields[1])
+                    if os.path.normpath(target)==j['source']:raise Unsafe('original folder still has a configured mount')
+            else:raise Unsafe('consumed request has an unresolved storage state')
+            if any(r['target']==j['source'] or r['target'].startswith(j['source']+'/') for r in mount_rows()):raise Unsafe('unexpected mount occupies the restored local folder')
+            return 'request already handled; local folder remains active'
+        except Unsafe:raise
+        except (Failure,OSError,ValueError,KeyError) as error:raise Unsafe('could not prove completed request: '+str(error)[:160]) from error
 
     # --- Undo --------------------------------------------------------------------
     def rollback_move(self,j):
@@ -268,7 +481,7 @@ class Offline:
             self.m.changed(original,j['sourceIdentity'],j.get('sourceUUID'))
             changes=diverged(original,j['dest'])
             if changes:
-                j['error']='Undo refused: '+str(len(changes))+' file(s) changed after the move and would be lost. The move is kept.';self.c.journal('moves',j['id'],j)
+                j['error']='Undo refused: '+str(len(changes))+' file(s) changed after the move and would be lost. The move is kept.';consume_intent(j);self.c.journal('moves',j['id'],j)
                 return 'undo refused: destination diverged'
             self.stage(j,'rolling-back')
         # From here on the only safe direction is forward: finish restoring.
@@ -277,12 +490,17 @@ class Offline:
             write_owned(self.c,'fstab',j['id'],None)
             self.unbind(j);self.remove_placeholder(j);self.put_back(j);self.drop_store(j)
             if identity(j['source'])[1:]!=j['sourceIdentity'][1:]:raise Unsafe('restored original identity differs')
-            if os.path.lexists(j['dest']):
+            if 'destContainer' in j:
+                from helper.destination import discard_private
+                self.m.private_layout(j)
+                if os.path.lexists(j['destContainer']):
+                    discard_private(j['destContainer'],{'identity':j['destIdentity'],'containerIdentity':j['containerIdentity']},missing_ok=True)
+            elif os.path.lexists(j['dest']):
                 with anchored_tree(j['dest']) as (parent,leaf,name):
                     if identity_fd(leaf)[1:]!=j['destIdentity'][1:]:raise Unsafe('destination copy changed')
                     delete_tree_fd(leaf);os.rmdir(name,dir_fd=parent);os.fsync(parent)
             j.pop('quarantine',None);j.pop('cutover',None);j['verified']=False;j['backup']=j['source']+'.pre-move'
-            self.m.stage(j,'rolled-back')
+            consume_intent(j);self.m.stage(j,'rolled-back');qa_crash('rolled-back')
         except Unsafe:raise
         except BaseException as error:raise Unsafe('undo interrupted: '+str(error)[:200]) from error
         say('undone; the original folder is back in place')
@@ -297,38 +515,45 @@ def main():
         receipt=maintenance.control_json(maintenance.RUNTIME/'boot.json')
         if receipt.get('bootId')!=current or receipt.get('valid') is not True:raise Unsafe('maintenance boot receipt is invalid')
     except BaseException as error:
-        # Nothing has been touched yet. Keep the request for inspection under a
-        # different name (the boot gate only reads the exact latch path) and
-        # boot normally rather than stranding the user at a blank screen.
-        say('maintenance request is invalid: '+str(error)[:200]+'. Nothing was changed.')
-        if os.path.lexists(maintenance.LATCH):
-            os.rename(maintenance.LATCH,str(maintenance.LATCH).replace('.json','.invalid-'+str(int(time.time()))+'.json'))
-            durable_directory(str(maintenance.LATCH.parent))
-        run(['/usr/bin/systemctl','--no-block','reboot'],timeout=30)
+        # This may be recovery from an earlier mutation. An invalid receipt is
+        # never proof that the familiar folder is safe for profile consumers.
+        say('maintenance request cannot be established: '+str(error)[:200]+'. Normal startup remains blocked. Keep all copies and request administrator recovery.')
         return 2
     c=Common()
     with c.storage_lock():
         j=c.read('moves',latch['moveId'])
         worker=Offline(c,current)
-        say(('moving ' if latch['action']=='continue' else 'undoing the move of ')+j['source']+'. Do not turn off the computer.')
+        say({'continue':'moving ','rollback':'undoing the move of ','return':'returning latest data to '}[latch['action']]+j['source']+'. Do not turn off the computer.')
         try:
             worker.settle()
-            outcome=worker.continue_move(j) if latch['action']=='continue' else worker.rollback_move(j)
+            if maintenance.consumed_request(latch,j):
+                outcome=worker.complete_consumed(j,latch['action'])
+                if j.get('needsAttention'):
+                    j.pop('needsAttention',None);j['error']='';c.journal('moves',j['id'],j)
+            else:
+                j['maintenanceIntent']={'action':latch['action'],'armedBootId':latch['armedBootId']}
+                c.journal('moves',j['id'],j)
+                operation={'continue':worker.continue_move,'rollback':worker.rollback_move,'return':worker.return_move}[latch['action']]
+                outcome=operation(j)
         except Unsafe as error:
-            # There is no console to inspect from here, so holding the gate
-            # would only strand the user at a blank screen. Keep both copies,
-            # record exactly where they are and boot normally; nothing further
-            # happens to this move until the user asks again.
+            # Never trade a blank maintenance screen for profile startup on a
+            # missing or ambiguous folder. Retain the durable boot barrier.
             j=c.read('moves',latch['moveId']);j['needsAttention']=True
-            j['error']='Needs attention: '+str(error)[:200]+'. Nothing was deleted. Original: '+j.get('backup','?')+' · copy: '+j['dest']
-            c.journal('moves',j['id'],j);outcome='stopped safely'
+            j['error']='Needs attention: '+str(error)[:200]+'. Normal startup is blocked; all copies are retained. Original: '+j.get('backup','?')+' · copy: '+j['dest']
+            c.journal('moves',j['id'],j)
             say(j['error'])
+            return 1
         except (Failure,OSError,ValueError,KeyError) as error:
-            # Refused before any change (identity, space, exclusion): nothing moved.
-            # Changes after quarantine are handled inside continue/rollback.
             j=c.read('moves',latch['moveId'])
+            # Mount/admission can fail before entering a recovery method's
+            # try block, even when an earlier boot already mutated storage.
+            if j['state'] in OFFLINE|maintenance.RETURN_STATES:
+                j['needsAttention']=True
+                j['error']='Recovery could not be established: '+str(error)[:160]+'. Normal startup is blocked; all copies are retained.'
+                c.journal('moves',j['id'],j);say(j['error']);return 1
+            # Refused while still in a known non-mutating state.
             j['error']='Not moved this time; nothing was changed. Restart again to retry. ('+str(error)[:160]+')'
-            c.journal('moves',j['id'],j);outcome='refused'
+            consume_intent(j);c.journal('moves',j['id'],j);outcome='refused'
             say(j['error'])
         maintenance.clear_latch(latch['moveId'])
         say(outcome+'. Restarting.')

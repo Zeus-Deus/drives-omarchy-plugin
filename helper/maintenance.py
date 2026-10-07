@@ -16,6 +16,7 @@ MASKS=('graphical.target','multi-user.target','user@.service','timers.target','p
 BOOT=re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 ACTIVATION_TYPES=('service','socket','timer','path','mount','automount','swap','scope')
 ACTIVATION_DROPIN='zzzz-drives-maintenance.conf'
+RETURN_STATES={'return-preparing','return-copying','return-verifying','return-switching','return-finishing'}
 
 
 def private_directory(path,create=False):
@@ -67,7 +68,7 @@ def control_json(path,cap=8192):
 
 def latch_request():
     value=control_json(LATCH)
-    if set(value)!={'version','moveId','action','armedBootId'} or type(value['version']) is not int or value['version']!=1 or value['action'] not in ('continue','rollback'):
+    if set(value)!={'version','moveId','action','armedBootId'} or type(value['version']) is not int or value['version']!=1 or value['action'] not in ('continue','rollback','return'):
         raise Failure('invalid maintenance request')
     if not isinstance(value['moveId'],str) or not re.fullmatch('[a-f0-9]{32}',value['moveId']):raise Failure('invalid maintenance move id')
     if not isinstance(value['armedBootId'],str) or not BOOT.fullmatch(value['armedBootId']):raise Failure('invalid maintenance boot id')
@@ -78,7 +79,7 @@ def write_latch(move_id,action,current_boot=None):
     """Arm one explicit request for the NEXT boot. Root only; the ordinary
     helper holds the storage lease and has already validated the journal."""
     if os.geteuid()!=0:raise Failure('maintenance requests require root')
-    if action not in ('continue','rollback'):raise Failure('invalid maintenance action')
+    if action not in ('continue','rollback','return'):raise Failure('invalid maintenance action')
     if not isinstance(move_id,str) or not re.fullmatch('[a-f0-9]{32}',move_id):raise Failure('invalid maintenance move id')
     if os.path.lexists(LATCH):raise Failure('another folder move is already waiting for a restart')
     value={'version':1,'moveId':move_id,'action':action,'armedBootId':current_boot or boot_id()}
@@ -99,12 +100,29 @@ def clear_latch(move_id,armed_boot=None):
     return value
 
 
+def consumed_request(value,move):
+    return move.get('maintenanceConsumed')=={'action':value['action'],'armedBootId':value['armedBootId']}
+
+
+def validate_move(value,move):
+    if move.get('id')!=value['moveId']:raise Failure('maintenance move missing')
+    if move.get('state') in RETURN_STATES and value['action']!='return':raise Failure('return stages require the return action')
+    if value['action']=='return':
+        if move.get('maintenanceProtocol')!=2:raise Failure('return requires protocol 2')
+        allowed={'switched','cleaned'}|RETURN_STATES
+        if consumed_request(value,move):allowed.add('returned')
+        if move.get('state') not in allowed:raise Failure('return move missing or already finished')
+        if move.get('returnRequest')!={'action':'return','armedBootId':value['armedBootId']}:raise Failure('return journal intent differs from the request')
+    elif move.get('state') in ('cleaned','rolled-back','returned'):
+        if move.get('state')!='rolled-back' or value['action']!='rollback' or not consumed_request(value,move):raise Failure('maintenance move missing or already finished')
+    return value
+
+
 def request(state_dir=STATE):
     state=private_directory(state_dir)
     value=latch_request()
     move=control_json(state/'moves'/(value['moveId']+'.json'),1024*1024)
-    if move.get('id')!=value['moveId'] or move.get('state') in ('cleaned','rolled-back'):raise Failure('maintenance move missing or already finished')
-    return value
+    return validate_move(value,move)
 
 
 def link(path,target):

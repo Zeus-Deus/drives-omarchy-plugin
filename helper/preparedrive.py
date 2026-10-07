@@ -5,15 +5,16 @@ in (helper/moves.py preflight): a root process writing into a user-owned
 directory could be redirected by any program running as that user. A drive
 set up by hand is usually mounted with the user as owner of its top folder.
 
-This changes exactly one thing: the owner and mode of the drive's top folder
-(root:root 0755). Nothing inside it changes, so folders already there stay
-the user's. It refuses unless the path is the root mount of an encrypted,
+This changes only the drive's top folder: root owns it, no other account can
+write there, and the former owner's read/traverse access is kept with an ACL.
+Existing group/named/other access is not widened. Nothing inside it changes.
+It refuses unless the path is the root mount of an encrypted,
 btrfs, non-system data disk that unlocks at boot from a root-only keyfile in
 crypttab, which is what the maintenance boot needs to move folders onto it.
 
 Runs in a transient unit that can write only that one mount.
 """
-import json,os,pathlib,stat,sys
+import errno,json,os,pathlib,stat,struct,sys
 from helper.common import Failure,mount_rows,mount_for
 
 REFUSED=('/home','/root','/run','/proc','/sys','/dev','/usr','/etc','/var','/boot','/tmp','/opt')
@@ -54,37 +55,85 @@ def is_drive_root(fd,path,m):
         and os.fstat(fd).st_ino==256 and parent.st_dev!=os.fstat(fd).st_dev)
 
 
-def prepare(path,**kw):
+def secured_acl(data,info):
+    """Linux POSIX ACL xattr v2: retain effective read/traverse, remove writes.
+
+    Freeze existing masked grants BEFORE adding the former owner. Otherwise
+    raising the mask for that new entry could expose a formerly masked user.
+    Layout/constants are defined by linux/posix_acl{,_xattr}.h, not libacl ABI.
+    """
+    undefined=0xffffffff
+    if data is None:
+        entries=[(1,(info.st_mode>>6)&7,undefined),(4,(info.st_mode>>3)&7,undefined),(32,info.st_mode&7,undefined)]
+    else:
+        if len(data)<4 or (len(data)-4)%8 or struct.unpack('<I',data[:4])[0]!=2:raise Failure('unsupported drive ACL format')
+        entries=list(struct.iter_unpack('<HHI',data[4:]))
+        if any(tag not in (1,2,4,8,16,32) or perm>7 for tag,perm,uid in entries):raise Failure('invalid drive ACL')
+        if any(sum(tag==base for tag,perm,uid in entries)!=1 for base in (1,4,32)):raise Failure('incomplete drive ACL')
+    mask=next((perm for tag,perm,uid in entries if tag==16),7)
+    owner=next(perm for tag,perm,uid in entries if tag==1)&5
+    kept=[]
+    for tag,perm,uid in entries:
+        if tag==16 or (tag==2 and uid==info.st_uid):continue
+        kept.append((tag,7 if tag==1 else perm&(mask if tag in (2,4,8) else 7)&5,uid))
+    if info.st_uid!=0:kept.append((2,owner,info.st_uid))
+    effective=0
+    for tag,perm,uid in kept:
+        if tag in (2,4,8):effective|=perm
+    kept.append((16,effective,undefined));kept.sort(key=lambda e:(e[0],e[2]))
+    return struct.pack('<I',2)+b''.join(struct.pack('<HHI',*entry) for entry in kept)
+
+
+def prepare(path,expected=None,**kw):
     m=check(path,**kw)
     fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:
         s=os.fstat(fd)
         if not stat.S_ISDIR(s.st_mode) or not is_drive_root(fd,path,m):raise Failure('the drive changed while preparing it')
+        if expected is not None:
+            from helper.moves import identity,identity_fd
+            if identity_fd(fd)!=expected or identity(path)!=expected:raise Failure('drive directory identity changed before preparation')
         before={'uid':s.st_uid,'gid':s.st_gid,'mode':oct(stat.S_IMODE(s.st_mode))}
-        if s.st_uid!=0 or s.st_gid!=0:os.fchown(fd,0,0)
-        if stat.S_IMODE(os.fstat(fd).st_mode)!=0o755:os.fchmod(fd,0o755)
+        try:acl=os.getxattr(fd,'system.posix_acl_access')
+        except OSError as exc:
+            if exc.errno!=errno.ENODATA:raise Failure('cannot establish existing drive access permissions') from exc
+            acl=None
+        secured=secured_acl(acl,s)
+        # Never pass through a more-public intermediate mode. Preserve the
+        # existing group identity; its effective access is preserved in the ACL.
+        if s.st_uid!=0:os.fchown(fd,0,-1)
+        os.fchmod(fd,0o700)
+        os.setxattr(fd,'system.posix_acl_access',secured)
         os.fsync(fd)
         a=os.fstat(fd)
         if a.st_uid!=0 or a.st_mode&0o022:raise Failure('the drive folder is still writable by a user')
     finally:os.close(fd)
-    return {'ok':True,'mountpoint':path,'before':before,'after':{'uid':0,'gid':0,'mode':'0o755'}}
+    return {'ok':True,'mountpoint':path,'before':before,
+        'after':{'uid':a.st_uid,'gid':a.st_gid,'mode':oct(stat.S_IMODE(a.st_mode))},'accessPreserved':True}
 
 
-def run_isolated(path):
+def run_isolated(path,expected=None):
     """Called by the helper: check, then change ownership in a fresh unit
     that can write only this mount."""
     import uuid
     from helper.common import run
     check(path)
+    args=[path]
+    if expected is not None:
+        from helper.moves import identity
+        if identity(path)!=expected:raise Failure('drive directory identity changed before preparation')
+        args.append(json.dumps(expected))
     out=run(['systemd-run','--quiet','--wait','--collect','--pipe','--unit=drives-prepare-'+uuid.uuid4().hex,
         '--property=WorkingDirectory=/usr/lib/drives-helper','--property=ProtectSystem=strict',
         '--property=ReadWritePaths='+path,'--property=ProtectHome=yes','--property=PrivateTmp=yes',
         '--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_READ_SEARCH',
-        '/usr/bin/python3','-B','-m','helper.preparedrive',path],timeout=120)
+        '/usr/bin/python3','-B','-m','helper.preparedrive',*args],timeout=120)
     return json.loads(out)
 
 
 if __name__=='__main__':
     if os.geteuid()!=0:raise Failure('root-only prepare worker')
-    if len(sys.argv)!=2:raise SystemExit('invalid prepare invocation')
-    print(json.dumps(prepare(sys.argv[1])))
+    if len(sys.argv) not in (2,3):raise SystemExit('invalid prepare invocation')
+    expected=json.loads(sys.argv[2]) if len(sys.argv)==3 else None
+    if expected is not None and (not isinstance(expected,list) or len(expected)!=3 or any(type(v) is not int or v<0 for v in expected[:2]) or (expected[2] is not None and (type(expected[2]) is not int or expected[2]<0))):raise Failure('invalid expected drive identity')
+    print(json.dumps(prepare(sys.argv[1],expected=expected)))

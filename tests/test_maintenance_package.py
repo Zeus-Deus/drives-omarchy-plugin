@@ -26,7 +26,7 @@ def test_maintenance_ends_boot_splash_without_normal_boot_dependencies():
     assert 'Type=oneshot' in text and 'RemainAfterExit=yes' in text
     assert 'ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth quit' in text
     assert 'ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth --wait' in text
-    assert 'ExecStart=-/usr/bin/pkill --exact plymouthd' in text
+    assert 'ExecStart=-/usr/bin/pkill --signal KILL --exact plymouthd' in text
     assert 'TimeoutStartSec=20' in text
     # A hung boot screen once timed the unit out and failed the target, so the
     # move was refused; the bounded steps must fit inside the unit timeout.

@@ -33,6 +33,10 @@ def test_smoke_does_not_change_directory_mtime(tmp_path,monkeypatch):
 def test_destination_creation_is_durable_before_execution(tmp_path,monkeypatch):
     import os
     from helper import moves
+    actual_stat=os.fstat
+    def root_metadata(fd):
+        s=actual_stat(fd);values=list(s);values[4]=0;return os.stat_result(values)
+    monkeypatch.setattr(os,'fstat',root_metadata)
     c=Common(tmp_path/'state');m=MoveManager(c);source=tmp_path/'source';source.mkdir();disk=tmp_path/'disk';disk.mkdir();seen=[];actual=os.fsync
     def sync(fd):seen.append(os.readlink('/proc/self/fd/'+str(fd)));actual(fd)
     monkeypatch.setattr(moves.os,'fsync',sync)
@@ -46,9 +50,9 @@ def test_destination_creation_is_durable_before_execution(tmp_path,monkeypatch):
     m.start(str(source),str(disk))
 
 
-def test_sensitive_profile_inside_tree_is_refused(tmp_path):
+def test_dormant_profile_inside_tree_is_allowed(tmp_path):
     p=tmp_path/'Videos';(p/'.hermes').mkdir(parents=True);(p/'.hermes'/'state').write_text('fixture')
-    with pytest.raises(Failure,match='protected subtree'):tree_stats(str(p))
+    assert tree_stats(str(p))['files']==1
 
 def test_walk_error_is_not_a_silent_skip(tmp_path,monkeypatch):
     from helper import moves

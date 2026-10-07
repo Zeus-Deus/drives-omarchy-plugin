@@ -16,8 +16,8 @@ def test_discard_ancestor_swap_never_deletes_replacement(tmp_path,monkeypatch,op
     monkeypatch.setattr(manager,'destination',lambda *a:None)
     monkeypatch.setattr(manager,'bound',lambda *a:False)
     admission=manager.discard_admission
-    def replace_ancestor(record):
-        admission(record);parent.rename(tmp_path/'held-parent');parent.mkdir();replacement=parent/'partial';replacement.mkdir();(replacement/'victim').write_bytes(b'keep unrelated data')
+    def replace_ancestor(record,**kwargs):
+        admission(record,**kwargs);parent.rename(tmp_path/'held-parent');parent.mkdir();replacement=parent/'partial';replacement.mkdir();(replacement/'victim').write_bytes(b'keep unrelated data')
     monkeypatch.setattr(manager,'discard_admission',replace_ancestor)
     try:getattr(manager,operation)(move_id)
     except Failure:pass # Refusal is also safe; redirection is not.

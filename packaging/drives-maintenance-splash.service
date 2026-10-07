@@ -17,7 +17,9 @@ RemainAfterExit=yes
 # The audit separately refuses any residual plymouthd process.
 ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth quit
 ExecStart=-/usr/bin/timeout 5 /usr/bin/plymouth --wait
-ExecStart=-/usr/bin/pkill --exact plymouthd
+# TERM can leave the initramfs daemon alive after its quit/wait budgets.
+# Admission still independently refuses any residual process.
+ExecStart=-/usr/bin/pkill --signal KILL --exact plymouthd
 TimeoutStartSec=20
 User=root
 NoNewPrivileges=yes

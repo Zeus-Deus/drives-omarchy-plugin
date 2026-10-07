@@ -5,21 +5,25 @@ import json,os,pathlib,sys
 import pytest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 from helper.common import Common,Failure
-from helper import moves,offline,configwriter
+from helper import moves,offline,configwriter,destination
 
 pytestmark=pytest.mark.skipif(os.geteuid()!=0,reason='quarantine needs root-owned ancestry')
 
 
-def fixture(tmp_path,monkeypatch,state='awaiting-maintenance'):
+def fixture(tmp_path,monkeypatch,state='awaiting-maintenance',private=True):
     os.chmod(tmp_path,0o755)
     home=tmp_path/'home';home.mkdir(mode=0o755)
     source=home/'Videos';source.mkdir();(source/'clip.mkv').write_bytes(b'x'*4096);(source/'sub').mkdir();(source/'sub'/'note').write_text('keep')
     os.link(source/'clip.mkv',source/'sub'/'clip-link')
-    disk=tmp_path/'data';disk.mkdir(mode=0o755);dest=disk/('drives-'+'a'*32);dest.mkdir(mode=0o700)
+    disk=tmp_path/'data';disk.mkdir(mode=0o755);container=disk/('drives-'+'a'*32);created={}
+    if private:
+        created=destination.create_private(str(container));dest=container/'content'
+    else:dest=container;dest.mkdir(mode=0o700)
     c=Common(tmp_path/'state')
     j={'id':'a'*32,'state':state,'source':str(source),'backup':str(source)+'.pre-move','dest':str(dest),'destMount':str(disk),
        'sourceIdentity':moves.identity(str(source)),'destIdentity':moves.identity(str(dest)),'uid':os.getuid(),'verified':False,
        'maintenanceProtocol':2,'sourceMount':str(tmp_path),'destMapper':'data','boot_id':'old'}
+    if private:j.update(destContainer=str(container),containerIdentity=created['containerIdentity'])
     c.journal('moves',j['id'],j)
     w=offline.Offline(c,'22222222-2222-2222-2222-222222222222')
     calls=[]
@@ -98,7 +102,7 @@ def test_undo_restores_original_and_removes_copy(tmp_path,monkeypatch):
     monkeypatch.setattr(w,'remove_placeholder',lambda j:None)
     assert w.rollback_move(j)=='undone'
     saved=c.read('moves',j['id'])
-    assert saved['state']=='rolled-back' and not dest.exists()
+    assert saved['state']=='rolled-back' and not dest.exists() and not pathlib.Path(saved['destContainer']).exists()
     assert moves.identity(str(source))[1:]==j['sourceIdentity'][1:] and (source/'sub'/'note').read_text()=='keep'
 
 
@@ -149,3 +153,43 @@ def test_missing_keyfile_is_a_plain_refusal(tmp_path,monkeypatch):
     real=offline.read_regular
     monkeypatch.setattr(offline,'read_regular',lambda p,cap=0:real(str(tab),cap) if p=='/etc/crypttab' else real(p,cap))
     with pytest.raises(Failure,match='unlock key is missing'):offline.crypttab_key('data')
+
+
+def test_private_copy_remains_unreadable_to_second_uid_with_named_acl(tmp_path,monkeypatch):
+    """Guest-root DAC proof, not a bind-mount/E2E proof (parent runs that gate)."""
+    import subprocess
+    c,w,j,source,dest,calls=fixture(tmp_path,monkeypatch)
+    source.chmod(0o755);source.parent.chmod(0o700)
+    token=source/'synthetic-token';token.write_bytes(b'synthetic-only confidentiality fixture');token.chmod(0o644)
+    (source/'external-link').symlink_to('/nonexistent-literal-fixture')
+    assert w.continue_move(j)=='moved'
+    wrapper=pathlib.Path(j['destContainer'])
+    assert dest.stat().st_mode&0o777==0o755 and (dest/'synthetic-token').stat().st_mode&0o777==0o644
+    assert wrapper.stat().st_uid==0 and wrapper.stat().st_mode&0o777==0o700
+    assert os.readlink(dest/'external-link')=='/nonexistent-literal-fixture'
+    subprocess.run(['/usr/bin/setfacl','-m','u:65534:r-x,m::---',str(wrapper)],check=True)
+    with moves.anchored_tree(str(wrapper)) as (_,fd,_):moves.private_container_fd(fd)
+    control=pathlib.Path(j['destMount'])/'public-control';control.write_bytes(b'reachable');control.chmod(0o644)
+    def drop():
+        os.chdir(tmp_path);os.setgroups([]);os.setgid(65534);os.setuid(65534)
+    # Begin from a pre-opened test directory so /root's own protection cannot
+    # make a broken wrapper pass. The world-readable control proves reachability.
+    relative=os.path.relpath(dest/'synthetic-token',tmp_path)
+    code="import pathlib,sys; assert pathlib.Path('data/public-control').read_bytes()==b'reachable';\ntry: pathlib.Path(sys.argv[1]).read_bytes()\nexcept PermissionError: pass\nelse: raise AssertionError('SSD copy exposed to second UID')"
+    result=subprocess.run(['/usr/bin/python3','-c',code,relative],preexec_fn=drop,capture_output=True,timeout=20)
+    assert result.returncode==0,result.stderr.decode()
+
+
+def test_legacy_destination_layout_is_not_migrated(tmp_path,monkeypatch):
+    c,w,j,source,dest,calls=fixture(tmp_path,monkeypatch,private=False)
+    with pytest.raises(Failure,match='legacy.*private'):w.continue_move(j)
+    assert (source/'clip.mkv').read_bytes()==b'x'*4096 and calls==[]
+    # Model a genuinely completed old-version move without admitting a new
+    # copy through the unsafe legacy production path. Its Undo stays supported.
+    with moves.anchored_tree(str(source)) as (_,fd,_):store=offline.prepare_store(fd,str(tmp_path),j['id'])
+    j['quarantine']=store;j['backup']=store['path']+'/original'
+    offline.move_original(str(source),j['sourceIdentity'],store)
+    offline.run(['/usr/bin/rsync','-aHAXS','--numeric-ids','--',j['backup']+'/',str(dest)+'/'])
+    source.mkdir(mode=0);j['state']='switched';j['verified']=True;c.journal('moves',j['id'],j)
+    os.rmdir(source);monkeypatch.setattr(w,'remove_placeholder',lambda *a:None)
+    assert w.rollback_move(j)=='undone' and not dest.exists()

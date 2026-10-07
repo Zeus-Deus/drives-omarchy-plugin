@@ -13,6 +13,7 @@ def test_discard_refuses_active_bind_when_backup_missing(tmp_path,monkeypatch,op
     dest=tmp_path/'dest';dest.mkdir();(dest/'new-work').write_bytes(b'preserve active work')
     c=Common(tmp_path/'state');manager=moves.MoveManager(c);move_id='1'*32
     j={'id':move_id,'state':state,'verified':False,'source':str(source),'sourceIdentity':moves.identity(source),'dest':str(dest),'destMount':str(tmp_path),'backup':str(tmp_path/'missing-backup')}
+    j['destIdentity']=moves.identity(dest)
     c.journal('moves',move_id,j)
     monkeypatch.setattr(manager,'destination',lambda *a:None)
     monkeypatch.setattr(manager,'bound',lambda *a:True)

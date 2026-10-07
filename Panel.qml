@@ -22,10 +22,28 @@ BarWidget {
     property bool autoUnlock: true
     property bool eraseDisk: false
     property string moveTarget: ""
+    property string sourceDestination: ""
     property string watchJob: ""
     property int cursor: 0
     property bool showAllSpace: false
     property var confirmationAction: null
+    property var assessment: null
+    property int assessmentEpoch: 0
+    property var scheduledRequest: null
+    property int scheduledEpoch: -1
+    onMoveSourceChanged: invalidateAssessment()
+    onMoveTargetChanged: invalidateAssessment()
+    onOwnsInteractionChanged: if (!ownsInteraction) invalidateAssessment()
+    onSeamlessMovesChanged: if (!seamlessMoves) invalidateAssessment()
+    readonly property bool seamlessMoves: storage.seamlessMoves === true
+    readonly property bool ownsInteraction: opened && (!bar || !bar.activePopout || bar.activePopout === root)
+    readonly property var assessmentJob: {
+        if (!assessment || !assessment.jobId) return null;
+        var jobs = storage.jobs || [];
+        for (var i = jobs.length - 1; i >= 0; i--) if (jobs[i].id === assessment.jobId) return jobs[i];
+        return null;
+    }
+    onAssessmentJobChanged: handleAssessment(assessmentJob)
 
     readonly property bool opened: controller.open
     readonly property bool popoutSwitchClosing: controller.popoutSwitchClosing
@@ -89,12 +107,12 @@ BarWidget {
             apps.forEach(function(a) { out.push({kind: "app", id: a.id}); });
             if (restartArmed) out.push({kind: "act", id: "restart"});
         } else if (view === "system") {
-            spaceRows.forEach(function(r) { if (r.movable) out.push({kind: "space", id: r.path}); });
+            spaceRows.forEach(function(r) { out.push({kind: "space", id: r.path || "system"}); });
             if (spaceCount.hidden > 0 && !showAllSpace) out.push({kind: "act", id: "showall"});
             apps.forEach(function(a) { if (a.movable) out.push({kind: "app", id: a.id}); });
         } else if (view === "drive" && chosenDrive) {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
-            if (Model.canPrepare(chosenDrive)) out.push({kind: "act", id: "prepare"});
+            if (chosenDrive.usage && targets.some(function(t) { return t.mountpoint === chosenDrive.usage.target; })) out.push({kind: "act", id: "move_here"});
             folderRows.forEach(function(f) { if (cdConfigured && f.move.destMount === chosenDrive.drive.mountpoint) out.push({kind: "move", id: f.id}); });
             if (cdConfigured) out.push({kind: "act", id: "export"});
         } else if (view === "add") {
@@ -125,7 +143,7 @@ BarWidget {
             return addStep === 1 ? ["󰋊", "Add drive", "step 1 of 2 · choose the disk"] : ["󰌾", "Encryption & unlock", "step 2 of 2 · how this disk opens"];
         if (view === "move") return ["󰉒", "Move folder", "keeps its path · moves during a restart"];
         if (view === "system" && sysRow)
-            return ["󰋊", sysRow.title, "OS disk · " + (sysRow.usage ? Model.compact(sysRow.usage.used) + " used · " + Model.compact(sysRow.usage.free) + " free" : "")];
+            return ["󰋊", sourceDestination ? "Choose a folder" : sysRow.title, sourceDestination ? "move to " + Model.display(sourceDestination) : "OS disk · " + (sysRow.usage ? Model.compact(sysRow.usage.used) + " used · " + Model.compact(sysRow.usage.free) + " free" : "")];
         if (view === "resume" && chosenMove) {
             var stage = Model.moveStage(chosenMove, pendingRestart);
             return [stage.indexOf("moved") === 0 || stage === "cleaned" ? "󰄬" : (Model.warning({moves: [chosenMove], restartPending: pendingRestart}) ? "󰀦" : "󰉒"),
@@ -133,7 +151,7 @@ BarWidget {
         }
         if (view === "progress") {
             var j = Model.jobText(watchedJob);
-            return [j.state === "failed" ? "󰀦" : (j.state === "done" ? "󰄬" : "󰔟"), j.title, j.state === "running" ? "working · you can close this panel" : (j.state === "failed" ? "stopped · nothing was changed by this step" : "done")];
+            return [j.state === "failed" ? "󰀦" : (j.state === "done" ? "󰄬" : "󰔟"), j.title, j.state === "running" ? "working · you can close this panel" : (j.state === "failed" ? Model.jobFailureHint(watchedJob) : "done")];
         }
         return ["󰋊", "Drives", Model.overviewMeta(storage)];
     }
@@ -153,9 +171,9 @@ BarWidget {
 
     // ---- actions --------------------------------------------------------------
     function open() { controller.open = true; service.opened = true; Qt.callLater(function() { service.scanSizes(Model.sizePaths(root.storage), false); }); }
-    function close() { confirm.opened = false; controller.open = false; service.opened = false; }
+    function close() { invalidateAssessment(); confirmationAction = null; confirm.opened = false; controller.open = false; service.opened = false; }
     function closeForPopoutSwitch() { controller.popoutSwitchClosing = true; close(); Qt.callLater(function() { controller.popoutSwitchClosing = false; }); }
-    function go(where) { pointerGate.reset(); view = where; cursor = 0; flick.contentY = 0; catcher.forceActiveFocus(); }
+    function go(where) { invalidateAssessment(); pointerGate.reset(); view = where; cursor = 0; flick.contentY = 0; catcher.forceActiveFocus(); }
     function back() {
         if (view === "add" && addStep === 2) { addStep = 1; cursor = Math.max(0, navIndex("pick", selectedDiskId)); return; }
         if (view === "overview") close(); else go("overview");
@@ -166,11 +184,21 @@ BarWidget {
     }
     function openDrive(key) { selectedKey = key; go("drive"); }
     function openMove(id) { selectedMoveId = id; go("resume"); }
-    function openSystem() { showAllSpace = false; otherField.text = ""; go("system"); service.scanSizes(Model.sizePaths(storage), false); }
+    function openSystem(destination) { sourceDestination = destination || ""; showAllSpace = false; otherField.text = ""; go("system"); service.scanSizes(Model.sizePaths(storage), false); }
     function openApp(id) {
         for (var i = 0; i < apps.length; i++) if (apps[i].id === id) {
-            if (apps[i].movable) openMoveFolder(apps[i].path, "");
+            if (apps[i].movable) openMoveFolder(apps[i].path, view === "system" ? sourceDestination : "");
             else if (id === "docker") { var d = Model.driveFor(storage, "/var/lib/docker"); if (d) openDiskRow(d.id); }
+            return;
+        }
+    }
+    function openSpace(path) {
+        for (var i = 0; i < spaceRows.length; i++) {
+            var r = spaceRows[i];
+            if ((r.path || "system") !== path) continue;
+            if (r.moveId) return openMove(r.moveId);
+            if (r.movable) return openMoveFolder(r.path, sourceDestination);
+            service.error = (r.why || "This entry cannot move as one folder.") + ". Choose an individual folder inside your home instead.";
             return;
         }
     }
@@ -188,7 +216,7 @@ BarWidget {
     }
     function addNext() { if (!serialOk) return false; addStep = 2; cursor = 0; catcher.forceActiveFocus(); return true; }
     function openMoveFolder(source, dest) {
-        folderField.text = source ? Model.shortPath(source) : "";
+        folderField.text = source || "";
         moveTarget = dest || (targets.length ? targets[0].mountpoint : "");
         go("move");
         cursor = Math.max(0, navIndex("target", moveTarget));
@@ -203,7 +231,7 @@ BarWidget {
     function run(n) {
         if (n.kind === "drive") openDrive(n.id);
         else if (n.kind === "sys") openSystem();
-        else if (n.kind === "space") openMoveFolder(n.id, "");
+        else if (n.kind === "space") openSpace(n.id);
         else if (n.kind === "app") openApp(n.id);
         else if (n.kind === "manual") openManual(n.id);
         else if (n.kind === "new") openAdd(n.id);
@@ -216,6 +244,7 @@ BarWidget {
     function act(op) {
         if (op === "home") return go("overview");
         if (op === "showall") { showAllSpace = true; return; }
+        if (op === "move_here" && chosenDrive && chosenDrive.usage) return openSystem(chosenDrive.usage.target);
         if (op === "restart")
             return ask("Restart now?\nOpen windows close. This restart takes a little longer while the folder is handled, then your desktop comes back.",
                        function() { close(); Quickshell.execDetached(["omarchy-system-reboot"]); }, "Restart");
@@ -232,7 +261,8 @@ BarWidget {
         var words = {
             resume_move: ["Move " + name + " during the next restart?\nWhile nothing else runs, the folder is copied, every file is checked, and " + name + " then opens the drive.", "Schedule"],
             rollback_move: ["Undo the move of " + name + " during the next restart?\nThe original comes back and the copy on the drive is removed. Refused if files changed since the move, so no work is lost.", "Schedule undo"],
-            delete_old_copy: ["Delete the old copy of " + name + "?\nYour files stay on the drive; only the duplicate on the OS disk goes. Undo is no longer possible afterwards. Btrfs snapshots may keep the space for a while.", "Delete"],
+            move_back: ["Move " + name + " back during the next restart?\nThe latest files, including changes since the move, are copied back to their original filesystem and verified before the bind is removed. The SSD copy and any kept original copy are kept. Enough free space is required; nothing changes until you restart.", "Schedule move back"],
+            delete_old_copy: ["Delete the old copy of " + name + "?\nYour files stay on the drive; only the duplicate on the original disk goes. Restoring the frozen original is no longer possible. Move back still keeps the latest files when available. Btrfs snapshots may keep the space for a while.", "Delete"],
             cancel_move: ["Cancel moving " + name + "?\nNothing has moved yet. The empty folder on the drive is removed and " + name + " stays where it is.", "Cancel move"],
             cancel_restart: ["Don't move " + name + " on the next restart?", "Don't move"]
         };
@@ -256,25 +286,90 @@ BarWidget {
         if (exportField.text === "") { exportField.forceActiveFocus(); return; }
         service.submit({op: "export_header", name: chosenDrive.drive.name, destination: Model.expandHome(exportField.text, home)});
     }
+    function invalidateAssessment() {
+        assessmentEpoch++;
+        if (assessment) { confirm.opened = false; confirmationAction = null; }
+        assessment = null;
+    }
+    function assessmentCurrent(a) {
+        return !!a && ownsInteraction && view === "move" && seamlessMoves && a.epoch === assessmentEpoch
+            && a.source === moveSource && a.destMount === moveTarget
+            && targets.some(function(t) { return t.mountpoint === a.destMount; });
+    }
     function reviewMove() {
-        if (moveSource === "" || moveTarget === "") { folderField.forceActiveFocus(); return; }
-        var name = Model.shortPath(moveSource), drive = moveTarget;
-        for (var i = 0; i < targets.length; i++) if (targets[i].mountpoint === moveTarget) drive = targets[i].title + " (" + Model.display(moveTarget) + ")";
-        var src = moveSource, dest = moveTarget;
-        ask(name + " stays exactly where it is.\nApps keep using " + name + "; the files will live on " + drive + ".\nNothing changes now: the folder is checked, then moved during your next restart. The old copy is kept until you delete it.",
-            function() { service.submit({op: "start_move", src: src, destMount: dest}); }, "Plan move");
+        if (!ownsInteraction || view !== "move" || !canWrite) return;
+        if (!seamlessMoves) { service.error = "Update the storage helper to use seamless folder moves. Run: sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh — then reopen Drives."; return; }
+        var typedSource = Model.typedFolder(folderField.text, home);
+        if (!typedSource.path) { service.error = typedSource.why || "Choose a folder inside your home."; folderField.forceActiveFocus(); return; }
+        if (!targets.some(function(t) { return t.mountpoint === moveTarget; })) { service.error = "Choose a mounted data drive that unlocks with the OS."; return; }
+        if (assessment && !assessmentCurrent(assessment)) invalidateAssessment();
+        if (assessment && assessment.state === "running") return;
+        if (assessment && assessment.state === "review") return showMoveReview();
+        var req = {op: "assess_move", src: moveSource, destMount: moveTarget};
+        assessment = {epoch: assessmentEpoch, source: req.src, destMount: req.destMount, request: req, jobId: "", state: "running", error: ""};
+        service.error = "";
+        if (service.submit(req) === false) {
+            assessment = {epoch: assessmentEpoch, source: req.src, destMount: req.destMount, request: req,
+                jobId: "", state: "failed", error: "The helper is busy. Retry when the current step finishes."};
+        }
+    }
+    function handleFinished(result, req) {
+        if (req && req.op === "assess_move") {
+            if (!assessmentCurrent(assessment) || assessment.request !== req) return;
+            var a = assessment;
+            assessment = {epoch: a.epoch, source: a.source, destMount: a.destMount, request: req,
+                jobId: result.jobId || "", state: result.ok && result.jobId ? "running" : "failed", error: Model.display(result.error || "Safety assessment could not start.")};
+            return;
+        }
+        if (result.ok && result.jobId) {
+            watchJob = result.jobId;
+            if (ownsInteraction && (req !== scheduledRequest || scheduledEpoch === assessmentEpoch)) go("progress");
+        }
+    }
+    function handleAssessment(job) {
+        if (!assessmentCurrent(assessment) || !job || job.id !== assessment.jobId || assessment.state !== "running") return;
+        if (job.state === "running" || job.state === "queued") return;
+        var a = assessment, result = job.result;
+        if (job.state !== "done" || !result || result.ok !== true) {
+            assessment = {epoch: a.epoch, source: a.source, destMount: a.destMount, request: a.request, jobId: a.jobId,
+                state: "failed", error: Model.display(job.error || (result && result.error) || "Safety assessment failed.")};
+            return;
+        }
+        if (result.source !== a.source || result.destMount !== a.destMount || typeof result.needsPreparation !== "boolean"
+                || !result.stats || typeof result.stats.files !== "number" || !Number.isSafeInteger(result.stats.files) || result.stats.files < 0
+                || typeof result.stats.bytes !== "number" || !Number.isFinite(result.stats.bytes) || result.stats.bytes < 0) {
+            assessment = {epoch: a.epoch, source: a.source, destMount: a.destMount, request: a.request, jobId: a.jobId,
+                state: "failed", error: "Invalid safety assessment: the result does not match this folder and drive. Retry."};
+            return;
+        }
+        assessment = {epoch: a.epoch, source: a.source, destMount: a.destMount, request: a.request, jobId: a.jobId, state: "review", result: result, error: ""};
+        showMoveReview();
+    }
+    function showMoveReview() {
+        if (!assessmentCurrent(assessment) || assessment.state !== "review" || !canWrite || confirm.opened) return;
+        var a = assessment, src = a.source, dest = a.destMount, prepare = a.result.needsPreparation;
+        ask(Model.moveReview(a.result), function() {
+            if (!assessmentCurrent(a) || assessment !== a || !canWrite) return;
+            var req = {op: "schedule_move", src: src, destMount: dest, prepareDestination: prepare};
+            scheduledRequest = req;
+            invalidateAssessment();
+            scheduledEpoch = assessmentEpoch;
+            service.submit(req);
+        }, "Schedule move");
     }
     readonly property var actionWords: ({
         resume_move: ["󰑓", "Move on next restart…", ""], restart: ["󰜉", "Restart now…", ""], cancel_restart: ["󰜺", "Don't move on next restart", ""],
         rollback_move: ["󰕌", "Undo move…", ""], delete_old_copy: ["󰆴", "Delete old copy…", "bad"], cancel_move: ["󰜺", "Cancel move…", ""],
+        move_back: ["󰕌", "Move back…", ""],
         prepare: ["󰒓", "Prepare for moves…", ""], reconnect: ["󰌆", "Reconnect drive", ""], recover: ["󰌆", "Unlock with recovery passphrase…", ""], export: ["󰈔", "Export header backup", ""],
+        move_here: ["󰉒", "Move folder here…", ""],
         provision: ["󰌾", "Encrypt & set up…", ""], review: ["󰉒", "Review move…", ""], home: ["󰋊", "Back to drives", ""], showall: ["󰁅", "Show all folders", ""]
     })
 
     Service {
         id: service
         onLaunching: root.close()
-        onFinished: function(result) { if (result.jobId) { root.watchJob = result.jobId; root.go("progress"); } }
+        onFinished: function(result, req) { root.handleFinished(result, req); }
     }
 
     WidgetButton {
@@ -853,16 +948,16 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var r: root.spaceRows[index] || ({})
-                                selectable: r.movable === true
-                                opacity: r.movable ? 1 : 0.7
-                                navIndex: root.navIndex("space", r.path)
+                                selectable: true
+                                opacity: 1
+                                navIndex: root.navIndex("space", r.path || "system")
                                 icon: "■"
                                 iconColor: r.color >= 0 ? root.segColor(r.color) : root.dim
                                 title: r.title || ""
                                 sub: r.movable ? "" : (r.why || "")
                                 trail: r.size || ""
                                 trailColor: r.movable ? root.ink : root.dim
-                                onChosen: root.openMoveFolder(r.path, "")
+                                onChosen: root.openSpace(r.path || "system")
                             }
                         }
 
@@ -876,7 +971,7 @@ BarWidget {
                                 id: otherField
                                 width: parent.width - otherButton.width - Style.space(8)
                                 placeholderText: "~/Games/Library"
-                                Keys.onReturnPressed: if (root.typed.path !== "") root.openMoveFolder(root.typed.path, "")
+                                Keys.onReturnPressed: if (root.typed.path !== "") root.openMoveFolder(root.typed.path, root.sourceDestination)
                             }
                             Button {
                                 id: otherButton
@@ -887,7 +982,7 @@ BarWidget {
                                 text: "Move… ⏎"
                                 enabled: root.typed.path !== ""
                                 opacity: enabled ? 1 : 0.4
-                                onClicked: root.openMoveFolder(root.typed.path, "")
+                                onClicked: root.openMoveFolder(root.typed.path, root.sourceDestination)
                             }
                         }
                         Note { visible: root.typed.why !== ""; text: root.typed.why; color: Color.urgent }
@@ -915,15 +1010,6 @@ BarWidget {
                                 readonly property var b: Model.blockedTargets(root.storage)[index] || ({})
                                 Text { width: parent.width; text: "Moving folders onto " + (b.title || "") + " (" + (b.mount || "") + ")"; color: root.ink; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
                                 Text { width: parent.width; text: b.issue || ""; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
-                                Button {
-                                    visible: b.prepare === true
-                                    bordered: true
-                                    foreground: root.ink
-                                    fontFamily: root.face
-                                    text: "󰒓  Prepare " + (b.mount || "") + " for moves…"
-                                    enabled: root.canWrite
-                                    onClicked: root.prepareDrive(b.mountpoint)
-                                }
                             }
                         }
                     }
@@ -957,7 +1043,7 @@ BarWidget {
 
                         Note { visible: root.cd.manual === true; text: "Set up outside this panel. Drives shows it and its folders but doesn't change its crypttab or fstab lines."; }
                         Note { visible: root.cd.manual === true && Model.targetIssue(root.cd) !== ""; text: Model.targetIssue(root.cd) }
-                        ActionRow { visible: Model.canPrepare(root.chosenDrive); op: "prepare" }
+                        ActionRow { visible: root.chosenDrive !== null && !!root.cd.usage && root.targets.some(function(t) { return t.mountpoint === root.cd.usage.target; }); op: "move_here" }
                         SectionHead { visible: (root.cd.folders || []).length > 0; label: "FOLDERS ON THIS DRIVE"; trail: "" }
                         Repeater {
                             model: root.manualRows.length
@@ -1154,15 +1240,6 @@ BarWidget {
                                 readonly property var b: Model.blockedTargets(root.storage)[index] || ({})
                                 Text { width: parent.width; text: (b.title || "") + " (" + (b.mount || "") + ")"; color: root.ink; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
                                 Text { width: parent.width; text: b.issue || ""; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
-                                Button {
-                                    visible: b.prepare === true
-                                    bordered: true
-                                    foreground: root.ink
-                                    fontFamily: root.face
-                                    text: "󰒓  Prepare " + (b.mount || "") + " for moves…"
-                                    enabled: root.canWrite
-                                    onClicked: root.prepareDrive(b.mountpoint)
-                                }
                             }
                         }
                         SectionHead { label: "WHAT HAPPENS"; trail: "" }
@@ -1171,7 +1248,7 @@ BarWidget {
                                 ["✓", "The path stays the same. Apps keep using it; the files live on the drive."],
                                 ["✓", "It moves during a restart, when nothing else uses it. Every file is checked."],
                                 ["✓", "The old copy stays until you delete it, so Undo works until then."],
-                                ["!", "Open files, profiles, keyrings, databases and unreadable files are refused, never skipped."]
+                                ["!", "Safety assessment checks actual use, ownership, files and storage. Close apps using this folder and retry if refused; hidden folders and dormant profiles are not refused just for their names."]
                             ]
                             Check {
                                 required property var modelData
@@ -1180,7 +1257,49 @@ BarWidget {
                                 tint: modelData[0] === "!" ? Color.urgent : root.ink
                             }
                         }
-                        ActionRow { op: "review"; enabled: root.canWrite && root.moveSource !== "" && root.moveTarget !== "" }
+                        Note {
+                            visible: root.storage.helperAvailable === true && !root.seamlessMoves
+                            text: "Update the storage helper to use seamless folder moves. Run: sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh — then reopen Drives."
+                            color: Color.urgent
+                        }
+                        Row {
+                            width: content.width
+                            spacing: Style.space(8)
+                            visible: root.assessment !== null && root.assessment.state === "running"
+                            Text {
+                                id: assessmentSpinner
+                                text: "󰑓"
+                                color: Color.accent
+                                font.family: root.face
+                                font.pixelSize: Style.font.body
+                                textFormat: Text.PlainText
+                                RotationAnimator on rotation { from: 0; to: 360; duration: 1100; loops: Animation.Infinite; running: root.opened && root.view === "move" && root.assessment !== null && root.assessment.state === "running" }
+                            }
+                            Text {
+                                width: parent.width - assessmentSpinner.width - Style.space(8)
+                                text: "Safety assessment · checking files, apps using the folder, and the destination… No administrator authorization or storage changes."
+                                color: root.ink
+                                wrapMode: Text.WordWrap
+                                font.family: root.face
+                                font.pixelSize: Style.font.bodySmall
+                                textFormat: Text.PlainText
+                            }
+                        }
+                        Note {
+                            visible: root.assessment !== null && root.assessment.state === "failed"
+                            text: root.assessment ? root.assessment.error : ""
+                            color: Color.urgent
+                        }
+                        Note {
+                            visible: service.mutating && service.request.op === "schedule_move"
+                            text: "Scheduling the move · Omarchy may ask for administrator authorization. Preparing the destination (if you agreed) and scheduling the next restart are one step."
+                            color: root.ink
+                        }
+                        ActionRow {
+                            op: "review"
+                            title: root.assessment && root.assessment.state === "failed" ? "Retry assessment…" : (root.assessment && root.assessment.state === "review" ? "Review move…" : "Check & review move…")
+                            enabled: root.canWrite && root.seamlessMoves && root.moveSource !== "" && root.moveTarget !== "" && (!root.assessment || root.assessment.state !== "running")
+                        }
                     }
 
                     // ================= E/F · one move =================

@@ -7,7 +7,7 @@ A bar widget and panel for encrypted data drives on Omarchy Quattro.
   passphrase for a reinstall or new machine.
 - Move a folder such as `~/Videos` onto the drive while keeping its path. Apps
   keep using `~/Videos`; the files live on the encrypted drive.
-- Undo a move, or delete the old copy once you are happy.
+- Move the latest files back, undo an unchanged move, or delete the old copy.
 - Recover after a reinstall (recovery passphrase) or when a drive was
   unplugged (reconnect).
 - See what fills your OS disk, biggest folders first, and move one from there.
@@ -18,8 +18,16 @@ A bar widget and panel for encrypted data drives on Omarchy Quattro.
 
 ## How moves work
 
-A folder is never moved while you are using it. You plan the move in the
-panel, then restart. During that restart nothing else runs: the folder is
+A folder is never moved while you are using it. Choose the folder and a data
+drive in the panel. Drives checks it first, without an administrator prompt.
+If an app or terminal is using it, it names the processes: close them or leave
+the folder, then retry. Hidden folders and dormant app profiles are not
+blocked just because of their names.
+
+Review the move, then authorize **Schedule move** once. Any required drive
+preparation is included in that confirmation; there is no separate command
+or preparation step. The folder moves on your next restart; **Restart now**
+is optional. During that restart nothing else runs: the folder is
 copied, every file is checked, and the old path then opens the drive. The
 computer restarts once more into your normal desktop. If power is cut halfway,
 the next start puts your original folder back unchanged.
@@ -28,9 +36,37 @@ The original is kept until you choose **Delete old copy**, which is only
 offered after one normal restart with the move working. **Undo** is refused if
 anything changed since the move, so it never loses new work.
 
-What will not move: browser and agent profiles, keyrings, `.ssh`/`.gnupg`,
-databases, unreadable files, open files, and files hardlinked from outside the
-folder. The panel says why instead of skipping anything.
+**Move back** copies the latest files to their original OS filesystem during a
+restart, including changes and deletions since the move. It verifies everything
+before removing the bind. It still works after **Delete old copy**; the SSD copy
+and any retained original copy are kept, not automatically deleted. It requires
+enough free space on the original filesystem and a plugin-owned private-layout
+move. The confirmation defaults to Cancel.
+
+If recovery cannot establish which complete copy is authoritative, normal
+startup stays blocked for administrator recovery. An invalid request is not
+permission to start applications against an absent or uncertain profile.
+
+What will not move: a folder outside your own home, the whole home directory,
+an existing or nested mount, a Btrfs subvolume root, unreadable files,
+active files/mappings/programs, sockets/FIFOs/devices, and files hardlinked
+from outside the folder. The panel says why instead of skipping anything.
+Links inside a folder are preserved as links, without copying their targets.
+Closed SQLite databases and app settings are assessed like other files;
+this is not a promise of compatibility with every application's storage setup.
+
+### Which directions are supported?
+
+Choose among mounted encrypted data drives that unlock with the OS. This is
+not yet a general any-drive-to-any-drive migration tool: an already
+bind-mounted folder cannot be moved to another drive from the panel, and the
+OS disk is not offered as a destination. **Undo** can restore an unchanged
+moved folder to its original storage while the old copy is still kept; it is
+not a migration of new or changed files back to that storage. **Move back** is
+the separate latest-data return path for plugin-owned private-layout moves
+originally on `/`, or a `/home` subvolume of the same OS filesystem. A separate
+`/home` filesystem, handmade binds and older public-copy layouts are not adopted.
+Untouched old plans must be cancelled and reassessed before further copying.
 
 ## Install
 
@@ -75,10 +111,16 @@ A LUKS drive you already unlock at boot (crypttab keyfile) and mount in fstab
 shows up as **unlocks with OS**, and the folders you bind-mounted from it are
 listed. Drives never edits its crypttab or fstab lines.
 
-To move folders onto such a drive, open it in the panel and choose **Prepare
-for moves…** once. That makes only its top folder (for example `/data`) owned
-by root, which the helper requires so no other program can swap a folder
-mid-move. Everything inside stays yours and keeps working.
+To move folders onto such a drive, select it normally. If its top folder
+(for example `/data`) needs preparation, the move review explains and includes
+it in the same authorization. Only that top folder becomes root-owned;
+everything inside keeps its owner and permissions. This is permanent, even
+if you later cancel the move. New top-level folders then require a move through
+Drives or administrator access; existing user-owned folders remain writable.
+Preparation preserves existing read/traverse access using an ACL rather than
+making a private drive public. Each new move also uses a root-private wrapper
+on the SSD, so a profile protected by your home directory is not exposed
+through a second, public path on the drive.
 
 ## Good to know
 

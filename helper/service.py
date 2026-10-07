@@ -1,11 +1,11 @@
 """System D-Bus entrypoint. Authorize unique sender per operation, no QML privilege."""
 import contextlib,fcntl,json,os,pathlib,stat,threading,time,uuid
 from helper.common import Common,Failure
-from helper.moves import MoveManager,ACTIVE
+from helper.moves import MoveManager,ACTIVE,ScheduleFailure
 
 BUS='io.github.zeus_deus.Drives';OBJECT='/io/github/zeus_deus/Drives'
-ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume','UnlockDrive':'unlock','ReconnectDrive':'reconnect','PrepareDrive':'prepare'}
-SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ReconnectDrive':'s','PrepareDrive':'s','ResumeDrive':'s','StartMove':'ss','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
+ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ScheduleMove':'move','MoveBack':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume','UnlockDrive':'unlock','ReconnectDrive':'reconnect','PrepareDrive':'prepare'}
+SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ReconnectDrive':'s','PrepareDrive':'s','ResumeDrive':'s','StartMove':'ss','AssessMove':'ss','ScheduleMove':'ssb','MoveBack':'s','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
 
 def pending_restart():
     """The armed maintenance request, as plain facts for the panel."""
@@ -43,8 +43,11 @@ class Server:
         reply=self.connection.call_sync('org.freedesktop.PolicyKit1','/org/freedesktop/PolicyKit1/Authority','org.freedesktop.PolicyKit1.Authority','CheckAuthorization',
             GLib.Variant('((sa{sv})sa{ss}us)',(subject,action,{},1,'')),None,Gio.DBusCallFlags.NONE,120000,None).unpack()[0]
         if not reply[0]:raise Failure('administrator authorization denied')
-        uid=self.connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetConnectionUnixUser',GLib.Variant('(s)',(sender,)),None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
-        return uid
+        return self.sender_uid(sender)
+    def sender_uid(self,sender):
+        from gi.repository import Gio,GLib
+        if not isinstance(sender,str) or not sender.startswith(':'):raise Failure('unique D-Bus sender required')
+        return self.connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetConnectionUnixUser',GLib.Variant('(s)',(sender,)),None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
     def status(self):
         from helper.provisioning import inspect
         moves=MoveManager(self.c).inspect()
@@ -53,7 +56,7 @@ class Server:
             for m in moves:
                 if m.get('updated',0)>=running['started'] and m.get('interruptedState') in ACTIVE:
                     m['state']=m['interruptedState'];m['error']=''
-        return {'ok':True,'version':'0.2.0','moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
+        return {'ok':True,'version':'0.2.0','seamlessMoves':True,'moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
@@ -82,7 +85,7 @@ class Server:
         def work():
             worker_started.set()
             try:
-                manager=MoveManager(self.c,uid=None if uid==0 else uid,isolated=True)
+                manager=MoveManager(self.c,uid=uid if method in ('AssessMove','ScheduleMove') else (None if uid==0 else uid),isolated=True)
                 if method=='ProvisionDrive':
                     from helper.provisioning import provision
                     result=provision(args[0],secret,self.c)
@@ -99,16 +102,19 @@ class Server:
                     from helper.provisioning import resume
                     result=resume(args[0],self.c)
                 elif method=='StartMove':result=manager.start(*args)
+                elif method=='AssessMove':result=manager.assess(*args)
+                elif method=='ScheduleMove':result=manager.schedule_move(*args)
                 elif method=='ExportHeaderBackup':
                     from helper.provisioning import export_header
                     result=export_header(*args,self.c,uid)
                 else:
-                    name={'ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete_old','CancelMove':'cancel','RestartMove':'restart','CancelRestart':'cancel_request'}[method]
+                    name={'ResumeMove':'resume','RollbackMove':'rollback','MoveBack':'move_back','DeleteOldCopy':'delete_old','CancelMove':'cancel','RestartMove':'restart','CancelRestart':'cancel_request'}[method]
                     result=getattr(manager,name)(args[0])
                 job['state']='done';job['result']=result
                 if method in ('ProvisionDrive','ResumeDrive'):self.draining=True
             except BaseException as exc:
                 job['state']='failed';job['error']=str(exc)[:300]
+                if isinstance(exc,ScheduleFailure):job['result']=exc.result
             finally:
                 try:self.c.journal('jobs',job['id'],job)
                 finally:
@@ -129,7 +135,8 @@ class Server:
         try:
             if method=='Status':result=self.status()
             else:
-                uid=self.authorize(sender,method);args=parameters.unpack();secret=None
+                uid=self.sender_uid(sender) if method=='AssessMove' else self.authorize(sender,method)
+                args=parameters.unpack();secret=None
                 if method in ('ProvisionDrive','UnlockDrive'):
                     if len(args[0].encode())>8192:raise Failure('request size limit exceeded')
                     if method=='ProvisionDrive':

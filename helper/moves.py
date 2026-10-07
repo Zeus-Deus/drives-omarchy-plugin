@@ -1,11 +1,16 @@
 """Fail-closed folder copy/verify/bind with inspect-only crash recovery."""
-import contextlib,errno,fcntl,hashlib,json,os,pathlib,pwd,shutil,stat,struct,time,uuid
+import contextlib,errno,fcntl,hashlib,json,os,pathlib,pwd,re,shutil,stat,struct,time,uuid
 from helper.common import Failure,run,mount_rows,mount_for,escape_fstab,read_regular
 from topology import probe,blocks
+from helper.maintenance import RETURN_STATES
 
-ACTIVE={'planned','quarantining','copying','verifying','switching','testing','rolling-back','cleaning'}
+ACTIVE={'planned','quarantining','copying','verifying','switching','testing','rolling-back','cleaning'}|RETURN_STATES
 WAITING={'awaiting-maintenance'}
-PROTECTED={'.hermes','.claude','.codex','.codemux','.opencode','.config','.ssh','.gnupg','.mozilla','.password-store','keyrings','chromium','google-chrome','firefox','postgres','postgresql','mysql','mariadb'}
+
+class ScheduleFailure(Failure):
+    """Structured partial outcome: preparation is permanent, not rolled back."""
+    def __init__(self,message,result):
+        super().__init__(message);self.result=result
 
 def durable_directory(path):
     fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -30,6 +35,25 @@ def identity(path):
     fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:return identity_fd(fd)
     finally:os.close(fd)
+
+def private_container_fd(fd):
+    """The wrapper, never rsync's content root, is the confidentiality boundary."""
+    s=os.fstat(fd)
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or stat.S_IMODE(s.st_mode)!=0o700:
+        raise Failure('destination container must be root-private mode 0700')
+    try:acl=os.getxattr(fd,'system.posix_acl_access')
+    except OSError as error:
+        if error.errno not in (errno.ENODATA,errno.ENOTSUP):raise
+    else:
+        if len(acl)<4 or (len(acl)-4)%8 or struct.unpack_from('<I',acl)[0]!=2:raise Failure('invalid private-container ACL')
+        entries=[struct.unpack_from('<HHI',acl,i) for i in range(4,len(acl),8)]
+        masks=[permission for tag,permission,_ in entries if tag==16]
+        # Linux applies the access mask to *all* named UID/GID entries. Do
+        # not accept an effective named-ACL bypass even if stat was forged.
+        if len(masks)!=1 or masks[0]!=0 or any(tag==32 and permission for tag,permission,_ in entries):
+            raise Failure('destination container ACL is not private (effective mask must be zero)')
+    return identity_fd(fd)
+
 
 def safe_path(path):
     if not isinstance(path,str) or not path.startswith('/') or '\0' in path or '\n' in path:raise Failure('invalid absolute path')
@@ -73,24 +97,63 @@ def delete_tree_fd(fd):
             else:os.unlink(entry.name,dir_fd=fd)
     os.fsync(fd)
 
-def protected(path):
-    p=pathlib.Path(path)
-    if not path.startswith('/home/') or len(p.parts)<4 or any(x.lower() in PROTECTED for x in p.parts):raise Failure('protected path: profiles, credentials and system directories cannot move')
-    if path.startswith(('/home/root/','/home/lost+found/')):raise Failure('protected path')
+def protected(path,uid=None):
+    """Only a real directory strictly inside the actual caller's home.
 
-def open_users(path):
-    found=[]
-    for proc in pathlib.Path('/proc').glob('[0-9]*'):
+    Keep the old name/API, but do not treat hidden/profile names as danger.
+    uid=None is the legacy administrator API's source-owner policy; the new
+    assessed methods always supply the unique bus sender's exact UID.
+    """
+    p=safe_path(path)
+    s=p.stat()
+    uid=s.st_uid if uid is None else uid
+    if uid==0:raise Failure('protected path: root home moves are unsupported')
+    try:user=pwd.getpwuid(uid);home=safe_path(user.pw_dir)
+    except (KeyError,OSError) as exc:raise Failure('cannot establish caller home') from exc
+    system_roots={'etc','usr','bin','sbin','lib','lib64','var','run','proc','sys','dev','boot','opt','tmp'}
+    if len(home.parts)<3 or home.parts[1] in system_roots or p==home or home not in p.parents:raise Failure('protected path: choose a folder inside your own home, not the whole home or a system directory')
+    if not stat.S_ISDIR(s.st_mode):raise Failure('source must be a real directory')
+    if s.st_uid!=uid:raise Failure('source is not owned by the caller')
+    if home.stat().st_uid!=uid:raise Failure('caller home is not owned by the caller')
+    groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
+    for ancestor in p.parents:
+        info=ancestor.stat()
+        permission=(info.st_mode>>6)&7 if info.st_uid==uid else ((info.st_mode>>3)&7 if info.st_gid in groups else info.st_mode&7)
+        if not permission&1:raise Failure('unreadable ancestor: caller cannot reach this folder')
+        if ancestor==home:break
+    return uid
+
+def open_users(path,proc_root='/proc'):
+    """Inspect process metadata only, never user file contents or environments.
+
+    A /proc snapshot is a refusal aid, not a writer lease. The maintenance
+    boot still establishes exclusion before copying/cutover.
+    """
+    found=[];path=str(path)
+    def inside(target):
+        if target==path or target.startswith(path+'/'):return True
+        if target.endswith(' (deleted)'):target=target[:-10]
+        return target==path or target.startswith(path+'/')
+    for proc in pathlib.Path(proc_root).glob('[0-9]*'):
         try:
-            targets=list((proc/'fd').iterdir())+[proc/'cwd',proc/'root']
+            used=False
+            targets=list((proc/'fd').iterdir())+[proc/'cwd',proc/'root',proc/'exe']
             for fd in targets:
                 try:target=os.readlink(fd)
                 except PermissionError:raise
                 except (FileNotFoundError,ProcessLookupError):continue
-                if target==path or target.startswith(path+'/'):
-                    found.append({'pid':int(proc.name),'name':(proc/'comm').read_text().strip()});break
+                if inside(target):used=True;break
+            if not used:
+                # mmap can survive closing the last fd. /proc maps exposes
+                # backing paths, not mapped contents; newline is escaped there.
+                for line in read_regular(proc/'maps',8*1024*1024).decode('utf-8','surrogateescape').split('\n'):
+                    fields=line.split(None,5)
+                    if len(fields)==6 and (inside(fields[5]) or inside(fields[5].replace('\\012','\n'))):used=True;break
+            if used:
+                name=read_regular(proc/'comm',4096).decode('utf-8','replace').strip()[:80]
+                found.append({'pid':int(proc.name),'name':name})
         except PermissionError as exc:
-            raise Failure("cannot inspect open files; root helper needs proc visibility") from exc
+            raise Failure('cannot inspect active use; root helper needs proc visibility') from exc
         except (FileNotFoundError,ProcessLookupError):continue
     return found[:24]
 
@@ -99,17 +162,24 @@ def tree_stats(path,uid=None):
     if uid is not None:
         user=pwd.getpwuid(uid);groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
     def unreadable(exc):raise Failure('unreadable subtree; refusing a silent skip') from exc
+    def readable(s):
+        if uid is None or stat.S_ISLNK(s.st_mode):return
+        permission=(s.st_mode>>6)&7 if s.st_uid==uid else ((s.st_mode>>3)&7 if s.st_gid in groups else s.st_mode&7)
+        need=5 if stat.S_ISDIR(s.st_mode) else 4
+        if permission&need!=need:raise Failure('unreadable subtree: close its owner and fix permissions before moving')
+    root_info=os.lstat(path);readable(root_info)
+    if not stat.S_ISDIR(root_info.st_mode):raise Failure('source must be a real directory')
     links={}  # (dev, ino) -> [link count, names seen inside this tree]
     # Sort within each directory, not one million entries in memory.
     for root,dirs,files in os.walk(path,topdown=True,followlinks=False,onerror=unreadable):
-        if any(name.lower() in PROTECTED for name in dirs):raise Failure('protected subtree: profiles, credentials or databases cannot move')
         dirs.sort();files.sort();directories+=1
         for name in dirs+files:
             p=os.path.join(root,name);s=os.lstat(p);rel=os.fsencode(os.path.relpath(p,path))
-            if uid is not None and not stat.S_ISLNK(s.st_mode):
-                permission=(s.st_mode>>6)&7 if s.st_uid==uid else ((s.st_mode>>3)&7 if s.st_gid in groups else s.st_mode&7)
-                need=5 if stat.S_ISDIR(s.st_mode) else 4
-                if permission&need!=need:raise Failure('unreadable subtree: close its owner and fix permissions before moving')
+            readable(s)
+            if s.st_dev!=root_info.st_dev:raise Failure('nested filesystem blocks the move')
+            # rsync -a preserves the link itself, never its referent. Relative
+            # and absolute external links keep their meaning through the
+            # familiar bind path; rejecting them would block ordinary profiles.
             if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Failure('special file refused (socket, FIFO or device)')
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
             if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0])[1]+=1
@@ -135,8 +205,16 @@ class MoveManager:
             '/usr/bin/python3','-B','-m','helper.destination',*args],timeout=3600)
         return json.loads(out)
     def make_destination(self,j):
-        j['destIdentity']=self.destination_op(j,'create',j['dest'])['identity']
+        if 'destContainer' in j:
+            self.private_layout(j)
+            result=self.destination_op(j,'create-private',j['destContainer'])
+            j['destIdentity']=result['identity'];j['containerIdentity']=result['containerIdentity']
+        else:j['destIdentity']=self.destination_op(j,'create',j['dest'])['identity']
         self.c.journal('moves',j['id'],j)
+    def private_layout(self,j):
+        if j['destContainer']!=j['destMount']+'/drives-'+j['id'] or j['dest']!=j['destContainer']+'/content':
+            raise Failure('private destination layout changed; inspect before continuing')
+        safe_path(j['destContainer']);safe_path(j['dest'])
     def stage(self,j,state):
         j['state']=state;j['updated']=time.time()
         if state!='paused':j['error']=''
@@ -147,25 +225,66 @@ class MoveManager:
             topology=probe(str(path),resolve=False)
             if not topology['supported'] or topology['chain'][-1].get('uuid')!=fsuuid or actual[1]!=want[1] or actual[2:]!=want[2:]:raise Failure('filesystem, subvolume or directory identity changed; inspect before continuing')
         elif actual!=want:raise Failure('directory identity changed; inspect before continuing')
-    def preflight(self,src,destMount):
-        protected(src)
-        origin=probe(src,resolve=False)
-        if not origin['supported'] or origin['mount']['fstype'] not in ('btrfs','ext4','xfs'):raise Failure('unsupported source storage topology')
+    def _preflight(self,src,destMount,allow_preparation=False):
+        uid=protected(src,self.uid)
         source=safe_path(src);target=safe_path(destMount)
-        s=source.stat();uid=self.uid if self.uid is not None else s.st_uid
-        if s.st_uid!=uid:raise Failure('source is not owned by the caller')
-        rows=mount_rows()
+        rows=mount_rows();block=blocks()
+        origin=probe(src,block,rows,resolve=False)
+        if not origin['supported'] or origin['mount']['fstype'] not in ('btrfs','ext4','xfs'):raise Failure('unsupported source storage topology')
+        source_id=identity(src)
+        parent_id=identity(str(source.parent));mount_id=identity(destMount)
+        if source_id[1]==256 and source_id[2] is not None:raise Failure('source subvolume root cannot be quarantined; choose an ordinary folder')
         if any(r['target']==src or r['target'].startswith(src+'/') for r in rows):raise Failure('nested or existing mount blocks the move')
         owners=open_users(src)
-        if owners:raise Failure('open files block the move: '+', '.join(x['name']+' (pid '+str(x['pid'])+')' for x in owners))
-        topology=probe(destMount,blocks(),rows,resolve=False)
+        if owners:raise Failure('Close these apps or leave this folder, then retry; active use (open files, cwd, mmap or executable): '+', '.join(x['name']+' (pid '+str(x['pid'])+')' for x in owners))
+        topology=probe(destMount,block,rows,resolve=False)
         if not topology['supported'] or not topology.get('encrypted') or topology['mount']['target']!=destMount:raise Failure('destination must be a mounted single encrypted disk')
-        t=target.stat()
-        if t.st_uid!=0 or t.st_mode&0o022:raise Failure('destination mount must be root-owned and not group/world writable')
+        if 'ro' in topology['mount'].get('options','').split(','):raise Failure('destination is read-only')
+        # The offline worker mounts a Btrfs drive root, not an arbitrary bind,
+        # system disk, subvolume or manual-unlock destination.
+        from helper.preparedrive import check
+        check(destMount,probe=probe,rows=rows)
+        t=target.stat();needs=t.st_uid!=0 or bool(t.st_mode&0o022)
+        if needs:
+            if not allow_preparation:raise Failure('destination mount must be root-owned and not group/world writable; explicit preparation consent is required')
+            if t.st_uid not in (0,uid):raise Failure('destination mount is not owned by the caller or root')
         if destMount==src or destMount.startswith(src+'/') or src.startswith(destMount+'/'):raise Failure('source and destination overlap')
         stats=tree_stats(src,uid);v=os.statvfs(target)
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
+        if identity(src)!=source_id or identity(str(source.parent))!=parent_id or identity(destMount)!=mount_id:raise Failure('source or destination directory changed during assessment')
+        identities={'sourceIdentity':source_id,'parentIdentity':parent_id,'mountIdentity':mount_id,
+            'sourceUUID':origin['chain'][-1]['uuid'],'sourceMount':origin['mount']['target']}
+        return stats,topology,uid,needs,identities
+    def preflight(self,src,destMount):
+        stats,topology,uid,_,_=self._preflight(src,destMount)
         return stats,topology,uid
+    def conflicts(self,src,exclude=None):
+        if os.path.lexists(src+'.pre-move'):raise Failure('old-copy path already exists')
+        for record in self.c.records('moves'):
+            if record['id']==exclude or record['state']=='rolled-back':continue
+            # Returned local data is a fresh source again; history still owns
+            # its frozen original and SSD copy, never the returned live folder.
+            keys=('backup','dest') if record['state']=='returned' else ('source','backup','dest')
+            paths=[record.get(k,'') for k in keys]
+            if record.get('returnStore'):paths.append(record['returnStore']['path'])
+            paths.extend(store['path'] for store in record.get('retainedReturnStages',[]))
+            if any(p and (p==src or p.startswith(src+'/') or src.startswith(p+'/')) for p in paths):raise Failure('this folder overlaps an existing move; inspect it first')
+    def controls(self):
+        from helper.maintenance import LATCH,RUNTIME
+        if os.path.lexists(LATCH) or os.path.lexists(RUNTIME):raise Failure('maintenance controls require inspection before normal storage operations')
+    def admit(self,src,destMount,allow_preparation=False,exclude=None):
+        self.controls();self.conflicts(src,exclude)
+        stats,topology,uid,needs,identities=self._preflight(src,destMount,allow_preparation)
+        source_mount,mapper=self.offline_layout(src,topology)
+        if source_mount!=identities['sourceMount']:raise Failure('source mount changed during assessment')
+        safe_path(src);safe_path(destMount);protected(src,uid)
+        if identity(src)!=identities['sourceIdentity'] or identity(str(pathlib.Path(src).parent))!=identities['parentIdentity'] or identity(destMount)!=identities['mountIdentity']:raise Failure('source or destination directory changed during assessment')
+        self.controls();self.conflicts(src,exclude)
+        return {'stats':stats,'topology':topology,'uid':uid,'needsPreparation':needs,
+            'destMapper':mapper,**identities}
+    def assess(self,src,destMount):
+        facts=self.admit(src,destMount,allow_preparation=True)
+        return {'ok':True,'source':src,'destMount':destMount,'needsPreparation':facts['needsPreparation'],'stats':facts['stats']}
     def offline_layout(self,src,topology):
         """Facts the maintenance boot needs to mount both sides by itself."""
         from helper.offline import crypttab_key
@@ -181,16 +300,66 @@ class MoveManager:
     def start(self,src,destMount):
         stats,topology,uid=self.preflight(src,destMount)
         source_mount,mapper=self.offline_layout(src,topology)
-        id=uuid.uuid4().hex;dest=destMount+'/drives-'+id;backup=src+'.pre-move'
-        if os.path.lexists(backup):raise Failure('old-copy path already exists')
-        if any(r.get('source')==src and r['state'] not in ('cleaned','rolled-back') for r in self.c.records('moves')):raise Failure('this folder already has an unfinished move')
-        j={'id':id,'state':'planned','source':src,'destMount':destMount,'dest':dest,'backup':backup,
-           'sourceIdentity':identity(src),'sourceUUID':probe(src,resolve=False)['chain'][-1]['uuid'],'parentIdentity':identity(str(pathlib.Path(src).parent)),'destUUID':topology['chain'][-1]['uuid'],'mountIdentity':identity(destMount),'diskSerial':topology['disk'].get('serial'),
-           'uid':uid,'stats':stats,'boot_id':self.c.boot_id(),'verified':False,'created':time.time(),
-           'maintenanceProtocol':2,'sourceMount':source_mount,'destMapper':mapper,
-           'destFSRoot':os.path.normpath(topology['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(dest,destMount))}
+        self.conflicts(src)
+        facts={'stats':stats,'topology':topology,'uid':uid,'sourceMount':source_mount,'destMapper':mapper,
+            'sourceIdentity':identity(src),'sourceUUID':probe(src,resolve=False)['chain'][-1]['uuid'],
+            'parentIdentity':identity(str(pathlib.Path(src).parent)),'mountIdentity':identity(destMount)}
+        j=self.new_plan(src,destMount,facts)
         self.stage(j,'planned');self.make_destination(j)
         return self.execute(j)
+    def new_plan(self,src,destMount,facts):
+        topology=facts['topology']
+        id=uuid.uuid4().hex;container=destMount+'/drives-'+id;dest=container+'/content';backup=src+'.pre-move'
+        return {'id':id,'state':'planned','source':src,'destMount':destMount,'dest':dest,'destContainer':container,'backup':backup,
+           'sourceIdentity':facts['sourceIdentity'],'sourceUUID':facts['sourceUUID'],'parentIdentity':facts['parentIdentity'],'destUUID':topology['chain'][-1]['uuid'],'mountIdentity':facts['mountIdentity'],'diskSerial':topology['disk'].get('serial'),
+           'uid':facts['uid'],'stats':facts['stats'],'boot_id':self.c.boot_id(),'verified':False,'created':time.time(),
+           'maintenanceProtocol':2,'sourceMount':facts['sourceMount'],'destMapper':facts['destMapper'],
+           'destFSRoot':os.path.normpath(topology['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(dest,destMount))}
+    def same_admission(self,j,facts):
+        for key in ('sourceIdentity','sourceUUID','parentIdentity','mountIdentity','sourceMount','destMapper','uid'):
+            if facts[key]!=j[key]:raise Failure('source or destination identity changed during scheduling; inspect the plan')
+        t=facts['topology']
+        if t['chain'][-1]['uuid']!=j['destUUID'] or t['disk'].get('serial')!=j['diskSerial'] or os.path.normpath(t['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(j['dest'],j['destMount']))!=j['destFSRoot']:
+            raise Failure('destination topology changed during scheduling; inspect the plan')
+    def schedule_move(self,src,destMount,prepareDestination):
+        if type(prepareDestination) is not bool:raise Failure('preparation consent must be a boolean')
+        facts=self.admit(src,destMount,allow_preparation=True)
+        if facts['needsPreparation'] and not prepareDestination:raise Failure('explicit consent is required for permanent destination mount-root preparation')
+        j=self.new_plan(src,destMount,facts)
+        j['preparation']={'required':facts['needsPreparation'],'attempted':False,'completed':False}
+        # Save a recoverable identity/intent before a possibly permanent change.
+        self.stage(j,'planned')
+        arm_attempted=False
+        try:
+            if facts['needsPreparation']:
+                from helper.preparedrive import run_isolated
+                j['preparation']['attempted']=True;self.c.journal('moves',j['id'],j)
+                result=run_isolated(destMount,expected=j['mountIdentity'])
+                if not result.get('ok'):raise Failure('destination preparation worker did not confirm completion')
+                j['preparation']['completed']=True;j['preparation']['result']=result
+                self.c.journal('moves',j['id'],j)
+            # Do not trust either the assessment or the preparation worker.
+            current=self.admit(src,destMount,exclude=j['id']);self.same_admission(j,current)
+            j['stats']=current['stats'];self.c.journal('moves',j['id'],j)
+            self.make_destination(j);self.execute(j)
+            current=self.admit(src,destMount,exclude=j['id']);self.same_admission(j,current)
+            self.c.journal('moves',j['id'],j)
+            arm_attempted=True
+            result=self.request(j['id'],'continue')
+            result['preparation']=j['preparation']
+            return result
+        except BaseException as exc:
+            prep=j['preparation']
+            effect=('Destination mount-root preparation permanently changed its owner/mode; it was not rolled back. ' if prep['completed'] else
+                'Destination mount-root owner/mode may already have changed permanently; inspect it. ' if prep['attempted'] else 'Destination preparation was not performed. ')
+            message=effect+('Restart request may be armed; inspect or cancel it. ' if arm_attempted else '')+'Plan '+j['id']+': '+str(exc)
+            j['interruptedState']=j['state'];j['state']='paused';j['needsAttention']=True;j['error']=message[:300]
+            j['restartRequestMayBeArmed']=arm_attempted
+            saved=True
+            try:self.c.journal('moves',j['id'],j)
+            except BaseException:saved=False
+            raise ScheduleFailure(message,{'ok':False,'id':j['id'],'state':'paused','preparation':prep,
+                'restartRequestMayBeArmed':arm_attempted,'failureJournalSaved':saved}) from exc
     # --- maintenance requests (protocol 2) -------------------------------------
     def latch(self,*args):
         """Write /drives-maintenance-request.json from a fresh transient unit:
@@ -206,13 +375,29 @@ class MoveManager:
     def waiting(self,j):
         return j['state'] in WAITING or (j['state']=='paused' and j.get('interruptedState') in WAITING)
     def request(self,id,action):
+        if action not in ('continue','rollback','return'):raise Failure('invalid maintenance action')
         j=self.c.read('moves',id)
         if j.get('maintenanceProtocol')!=2:raise Failure('this older move needs administrator inspection; both copies are kept')
+        if action=='return':
+            self.controls();self.return_admission(j)
+            # Persist the intent before launching the root latch writer. Failure
+            # after its launch must never claim that the request is unarmed.
+            j['returnRequest']={'action':'return','armedBootId':self.c.boot_id()}
+            self.c.journal('moves',id,j)
+            attempted=False
+            try:
+                attempted=True;self.latch('arm',id,action)
+                j['error']='';j.pop('needsAttention',None);self.c.journal('moves',id,j)
+            except BaseException as error:
+                raise ScheduleFailure('Move back restart request may be armed; inspect or cancel it: '+str(error),
+                    {'ok':False,'id':id,'state':j['state'],'restartRequestMayBeArmed':attempted}) from error
+            return {'ok':True,'id':id,'state':'restart-required','action':action}
         if action=='continue':
             from helper.offline import OFFLINE
             if j['state'] in OFFLINE:pass # interrupted offline step: the worker restores the original first
             elif not self.waiting(j):raise Failure('this move is not waiting to run')
             else:
+                self.copy_layout(j)
                 self.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
                 if os.path.lexists(j['backup']) or self.bound(j):raise Failure('unexpected old copy or bind; inspect before continuing')
                 self.destination(j)
@@ -230,10 +415,39 @@ class MoveManager:
         if value['armedBootId']!=self.c.boot_id():raise Failure('this request was not made in the current session; inspect as administrator')
         self.latch('clear',id,value['armedBootId'])
         return {'ok':True,'id':id,'state':'request-cancelled'}
-    def destination(self,j):
-        safe_path(j['destMount']);safe_path(j['dest']);self.changed(j['destMount'],j['mountIdentity'],j.get('destUUID'));self.changed(j['dest'],j['destIdentity'],j.get('destUUID'))
+    def copy_layout(self,j):
+        # Flat journals remain inspectable and eligible for existing Undo/cleanup,
+        # but may never plan a new copy that loses the source's ancestor privacy.
+        # Protocol-1 planning cannot authorize Continue (request refuses it).
+        if j.get('maintenanceProtocol')==2 and 'destContainer' not in j:
+            raise Failure('Legacy flat-layout destination cannot copy safely; all copies are retained. Cancel this untouched plan and replan with a new private destination.')
+    def private_destination(self,j,allow_removed=False):
+        if 'destContainer' not in j:return # existing journals retain their layout
+        self.private_layout(j)
+        if allow_removed and not os.path.lexists(j['destContainer']):return
+        self.changed(j['destContainer'],j['containerIdentity'],j.get('destUUID'))
+        with anchored_tree(j['destContainer']) as (_,fd,_):
+            held=private_container_fd(fd)
+            if held[1:]!=j['containerIdentity'][1:]:raise Failure('private container identity changed')
+            try:content=os.open('content',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            except FileNotFoundError:
+                if allow_removed:return
+                raise
+            try:
+                actual=identity_fd(content)
+                if actual[1:]!=j['destIdentity'][1:] or actual[0]!=held[0] or actual[2:]!=held[2:]:raise Failure('private content identity changed')
+            finally:os.close(content)
+    def destination(self,j,allow_removed=False):
+        # Missing copy paths are admissible only while finishing a journalled
+        # Undo, never for Continue, bind status, Cancel or Start over.
+        allow_removed=allow_removed and j['state']=='rolling-back' and 'destContainer' in j
+        # Observe PID1 topology before touching paths: a missing drive's autofs
+        # must not stall Status or start an unlock merely to inspect a record.
         t=probe(j['destMount'],resolve=False)
         if not t['supported'] or not t.get('encrypted') or t['disk'].get('serial')!=j['diskSerial']:raise Failure('destination disk missing or changed')
+        safe_path(j['destMount']);safe_path(j['dest']);self.changed(j['destMount'],j['mountIdentity'],j.get('destUUID'))
+        if not allow_removed or os.path.lexists(j['dest']):self.changed(j['dest'],j['destIdentity'],j.get('destUUID'))
+        self.private_destination(j,allow_removed=allow_removed)
     def verify(self,src,dest):
         difference=run(['rsync','-aHAXS','--numeric-ids','--checksum','--dry-run','--itemize-changes','--delete','--',src+'/',dest+'/'],timeout=3600)
         if difference:raise Failure('checksum or metadata comparison differs; original is still kept')
@@ -247,6 +461,7 @@ class MoveManager:
             t=probe(j['destMount'],block,mounts=rows,resolve=False)
             if not t['supported'] or not t.get('encrypted') or t['disk'].get('serial')!=j['diskSerial']:return False
             if j.get('destUUID') and t['chain'][-1].get('uuid')!=j['destUUID']:return False
+            self.private_destination(j)
             row=mount_for(j['source'],rows);dest=t['mount']
             expected=j.get('destFSRoot')
             if not expected or expected!=os.path.normpath(dest['fsroot'].rstrip('/')+'/'+os.path.relpath(j['dest'],j['destMount'])):return False
@@ -278,6 +493,7 @@ class MoveManager:
             run(['chattr','+i',path]);durable_directory(path);durable_directory(str(pathlib.Path(path).parent));j['placeholderIdentity']=identity(path)
             self.c.journal('moves',j['id'],j)
     def execute(self,j):
+        self.copy_layout(j)
         # Protocol 1 copied a live source: never promote that path to a verified
         # cutover. Queue untouched sources for the new offline protocol instead.
         # No public caller can opt into protocol 2 through method arguments.
@@ -314,6 +530,68 @@ class MoveManager:
         j=self.c.read('moves',id)
         if j.get('maintenanceProtocol')!=2:raise Failure('legacy undo requires maintenance inspection; both copies are retained')
         return self.request(id,'rollback')
+    def move_back(self,id):
+        return self.request(id,'return')
+    def return_config(self,j,allow_removed=False):
+        """Prove an exact owned bind stanza; a manual lookalike is not ours."""
+        from helper.offline import fstab_line
+        from helper.configwriter import transform
+        expected=fstab_line(j);marker='# drives-helper '+j['id']
+        content=read_regular('/etc/fstab',65536).decode()
+        ownership=json.loads(read_regular(self.c.state_dir/('config-fstab-'+j['id']+'.json'),8192))
+        present=marker in content.splitlines()
+        if present:
+            if expected not in (ownership.get('line'),ownership.get('before')):raise Failure('fstab ownership differs')
+            remaining=transform(content,j['id'],None,{expected})
+        else:
+            if not allow_removed or ownership.get('line','missing') is not None and not (ownership.get('after','missing') is None and ownership.get('before')==expected):
+                raise Failure('owned fstab bind is missing')
+            remaining=content
+        for row in remaining.splitlines():
+            fields=row.split()
+            if fields and not fields[0].startswith('#') and len(fields)>1:
+                target=re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),fields[1])
+                if os.path.normpath(target)==j['source']:raise Failure('foreign fstab entry targets this folder')
+        return present
+    def return_origin(self,j):
+        if j.get('sourceMount') not in ('/','/home'):raise Failure('Move back currently supports only original OS / or /home storage')
+        parent=str(safe_path(j['source']).parent)
+        self.changed(parent,j['parentIdentity'],j.get('sourceUUID'))
+        for path in (parent,'/'):
+            t=probe(path,resolve=False)
+            expected='/' if path=='/' else j['sourceMount']
+            if not t['supported'] or t['mount']['target']!=expected or t['mount']['fstype'] not in ('btrfs','ext4','xfs') or t['chain'][-1].get('uuid')!=j['sourceUUID'] or 'ro' in t['mount'].get('options','').split(','):
+                raise Failure('original filesystem topology changed or is read-only')
+        root=identity(j['sourceMount']);held=identity(parent)
+        if root[0]!=held[0] or root[2:]!=held[2:]:raise Failure('return staging must share the original filesystem and subvolume')
+    def return_admission(self,j,offline=False,full=True):
+        if j.get('maintenanceProtocol')!=2 or not j.get('verified') or j.get('state') not in {'switched','cleaned'}|RETURN_STATES:
+            raise Failure('only an owned verified protocol-2 move can return')
+        if self.uid is not None and self.uid!=j['uid']:raise Failure('folder move belongs to another user')
+        if 'destContainer' not in j:raise Failure('Move back requires the private destination layout; retain legacy copies for inspection')
+        rows=mount_rows();source_rows=[r for r in rows if r['target']==j['source']]
+        if len(source_rows)>1 or source_rows and (source_rows[0]['fstype']=='autofs' or not self.bound(j,rows=rows)):
+            raise Failure('foreign or stacked bind blocks Move back')
+        if not offline and not source_rows and j['state'] not in RETURN_STATES:raise Failure('only an active owned bind can move back')
+        self.return_origin(j);self.destination(j)
+        paths=[j['source'],j['destContainer'],j['backup'],j['sourceMount'].rstrip('/')+'/.drives-return']
+        if j.get('returnStore'):paths.append(j['returnStore']['path'])
+        if any(r['target'].startswith(p+'/') or (r['target']==p and p!=j['source']) for p in paths for r in rows):raise Failure('nested mount blocks Move back')
+        if any(r['target']!=j['source'] and (r.get('fsroot')==j['destFSRoot'] or r.get('fsroot','').startswith(j['destFSRoot']+'/')) for r in rows):
+            raise Failure('foreign bind exposes the SSD content')
+
+        self.return_config(j,allow_removed=j['state']=='return-finishing')
+        if not full:return None
+        for path in (j['source'],j['dest']):
+            users=open_users(path)
+            if users:
+                names=', '.join(p['name']+' (pid '+str(p['pid'])+')' for p in users[:16])
+                raise Failure('close these apps or leave this folder or SSD copy, then retry Move back: '+names)
+        stats=tree_stats(j['dest'],j['uid'])
+        if j['state'] not in RETURN_STATES:
+            v=os.statvfs(str(pathlib.Path(j['source']).parent))
+            if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('original filesystem needs at least 1.2x latest apparent size free')
+        return stats
     def delete_old(self,id):
         j=self.c.read('moves',id)
         if not j.get('verified') or j.get('boot_id')==self.c.boot_id():raise Failure('cleanup requires saved verification and a successful reboot')
@@ -337,26 +615,78 @@ class MoveManager:
             # The private store held only the original; remove it once empty.
             with contextlib.suppress(FileNotFoundError):os.rmdir(j['quarantine']['path'])
         self.stage(j,'cleaned');return {'ok':True,'id':id,'state':'cleaned','spaceWarning':'Btrfs snapshots may retain this data; reclaimed space is not guaranteed.'}
-    def discard_admission(self,j):
+    def recorded_destination(self,j):
+        keys=('destIdentity','containerIdentity') if 'destContainer' in j else ('destIdentity',)
+        return all(isinstance(j.get(key),list) and len(j[key])==3 for key in keys)
+    def discard_admission(self,j,allow_incomplete=False):
         before_switch={'planned','copying','verifying','awaiting-maintenance'}
         phase=j.get('interruptedState') if j['state']=='paused' else j['state']
-        if phase not in before_switch or j.get('verified') or j.get('cutover') or j.get('placeholderIdentity') or j.get('quarantine'):
+        if phase not in before_switch or j.get('verified') or any(key in j for key in ('cutover','placeholderIdentity','quarantine','verification')):
             raise Failure('cannot discard a destination after a possible switch; inspect both copies')
-        from helper.maintenance import LATCH,latch_request
-        if os.path.lexists(LATCH) and latch_request()['moveId']==j['id']:raise Failure('cancel the pending restart first')
-        if os.path.lexists(j['backup']) or self.bound(j):raise Failure('active bind or old copy blocks discard')
+        from helper.maintenance import LATCH,RUNTIME,latch_request
+        if j.get('maintenanceProtocol')==2:
+            if os.path.lexists(LATCH) or os.path.lexists(RUNTIME):raise Failure('cancel the pending restart or inspect maintenance controls first')
+            store=j.get('sourceMount','').rstrip('/')+'/.drives-quarantine/'+j['id']
+            if os.path.lexists(store):raise Failure('quarantine exists; inspect before cancellation')
+            fstab=read_regular('/etc/fstab',65536).decode()
+            if '# drives-helper '+j['id'] in fstab.splitlines():raise Failure('saved mount configuration blocks cancellation')
+            ownership=self.c.state_dir/('config-fstab-'+j['id']+'.json')
+            if os.path.lexists(ownership):
+                record=json.loads(read_regular(ownership,8192))
+                if record.get('line') is not None or record.get('after') is not None:raise Failure('possible mount configuration blocks cancellation')
+        elif os.path.lexists(LATCH) and latch_request()['moveId']==j['id']:raise Failure('cancel the pending restart first')
+        rows=mount_rows()
+        # Incomplete plans have no owned destination to validate. An exact or
+        # nested source mount is independently refused below, without probing
+        # an unrecorded private child through bound().
+        if os.path.lexists(j['backup']) or self.recorded_destination(j) and self.bound(j):raise Failure('active bind or old copy blocks discard')
+        targets=[j['source'],j['backup'],j.get('destContainer',j['dest'])]
+        if any(row['target']==path or row['target'].startswith(path+'/') for row in rows for path in targets):raise Failure('mounted source or destination blocks discard')
         self.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
-        self.destination(j)
+        if j.get('parentIdentity'):self.changed(str(pathlib.Path(j['source']).parent),j['parentIdentity'],j.get('sourceUUID'))
+        if self.recorded_destination(j):self.destination(j)
+        elif not allow_incomplete or j.get('maintenanceProtocol')!=2:
+            raise Failure('missing destination identity; only safe protocol-2 cancellation is available')
     def discard_destination(self,id,restart=False):
         j=self.c.read('moves',id)
-        self.discard_admission(j)
-        if any(r['target']==j['dest'] or r['target'].startswith(j['dest']+'/') for r in mount_rows()):raise Failure('mounted destination blocks discard')
+        if restart:self.copy_layout(j)
+        self.discard_admission(j,allow_incomplete=not restart)
+        if not self.recorded_destination(j):
+            # A failed worker/journal write can leave an unowned directory.
+            # Cancel only this plan; NEVER adopt, delete or recreate that path.
+            target=j.get('destContainer',j['dest'])
+            try:
+                rows=mount_rows();t=probe(j['destMount'],mounts=rows,resolve=False)
+                mounted=[r for r in rows if r['target']==j['destMount'] and r['fstype']!='autofs']
+                # Kernel rows and nonresolving topology must agree on one live,
+                # writable, owned filesystem before even lstat of an unknown child.
+                inspected=bool(len(mounted)==1 and t['supported'] and t.get('encrypted') and
+                    t['mount']==mounted[0] and t['mount']['fstype'] in ('btrfs','ext4','xfs') and
+                    'ro' not in t['mount'].get('options','').split(',') and
+                    t['disk'].get('serial')==j['diskSerial'] and t['chain'][-1].get('uuid')==j['destUUID'] and
+                    os.path.normpath(t['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(j['dest'],j['destMount']))==j['destFSRoot'])
+            except (Failure,OSError,KeyError,IndexError,TypeError,ValueError):inspected=False
+            retained=target if not inspected or os.path.lexists(target) else None
+            message='Plan cancelled. Destination preparation, if performed, remains permanent.'
+            if not inspected:message+=' Destination path was not inspected and may be retained for administrator inspection: '+target
+            elif retained:message+=' Unrecorded destination directory retained for administrator inspection: '+retained
+            if retained:j['retainedDestination']=retained
+            j['destinationInspected']=inspected
+            self.stage(j,'rolled-back')
+            return {'ok':True,'id':id,'state':'rolled-back','message':message,'retainedDestination':retained,'destinationInspected':inspected}
+        target=j.get('destContainer',j['dest'])
+        if any(r['target']==target or r['target'].startswith(target+'/') for r in mount_rows()):raise Failure('mounted destination blocks discard')
         # The worker re-anchors the path itself and deletes only the recorded
-        # directory; a swapped ancestor or replaced folder is refused there.
-        args=['discard',j['dest'],json.dumps(j['destIdentity'])]+(['--recreate'] if restart else [])
+        # directories; a swapped ancestor or replaced folder is refused there.
+        if 'destContainer' in j:
+            args=['discard-private',j['destContainer'],json.dumps({'identity':j['destIdentity'],'containerIdentity':j['containerIdentity']})]
+        else:args=['discard',j['dest'],json.dumps(j['destIdentity'])]
+        if restart:args+=['--recreate']
         result=self.destination_op(j,*args)
         if restart:
-            j['destIdentity']=result['identity'];j['verified']=False;self.c.journal('moves',id,j)
+            j['destIdentity']=result['identity']
+            if 'destContainer' in j:j['containerIdentity']=result['containerIdentity']
+            j['verified']=False;self.c.journal('moves',id,j)
             return self.execute(j)
         self.stage(j,'rolled-back');return {'ok':True,'id':id,'state':'rolled-back'}
     def cancel(self,id):return self.discard_destination(id)
@@ -364,13 +694,24 @@ class MoveManager:
     def inspect(self):
         results=[];block=blocks();rows=mount_rows()
         for j in self.c.records('moves'):
-            live=dict(j);live['bound']=self.bound(j,block,rows) if 'destIdentity' in j else False
+            live=dict(j);live['bound']=self.bound(j,block,rows) if self.recorded_destination(j) else False
             live['originalAvailable']=os.path.lexists(j['source']) and not os.path.lexists(j['backup'])
             live['oldCopyAvailable']=os.path.lexists(j['backup'])
             if j['state'] in ACTIVE:
                 live['interruptedState']=j['state'];live['state']='paused';live['error']='Interrupted; inspect before Continue or Undo.'
+                if j['state'] in RETURN_STATES:live['error']=j.get('error') or 'Move back interrupted; inspect before retrying Move back. All copies are retained.'
             if j['state']=='switched' and j.get('verified') and j.get('boot_id')!=self.c.boot_id() and live['bound']:
                 live['state']='rebooted'
             live['canDelete']=live['state'] in ('rebooted','cleaning') and live['bound'] and j.get('verified',False) and j.get('maintenanceProtocol')==2
+            live['canCancelIncomplete']=False
+            live['canMoveBack']=False
+            if j.get('state') in {'switched','cleaned'}|RETURN_STATES:
+                try:self.return_admission(j,full=False)
+                except (Failure,OSError,KeyError,ValueError,TypeError):pass
+                else:live['canMoveBack']=True
+            if j.get('maintenanceProtocol')==2:
+                try:self.discard_admission(j,allow_incomplete=True)
+                except (Failure,OSError,KeyError,ValueError,TypeError):pass
+                else:live['canCancelIncomplete']=True
             results.append(live)
         return results

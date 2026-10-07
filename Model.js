@@ -58,7 +58,7 @@ function configuredFor(disk,drives) {
 // the only place the panel decides what a move row says and offers.
 function moveStage(move,pending) {
     var mine=pending && pending.valid && pending.moveId===move.id;
-    if(mine)return pending.action==="rollback"?"undo-on-restart":"move-on-restart";
+    if(mine)return pending.action==="return"?"return-on-restart":pending.action==="rollback"?"undo-on-restart":"move-on-restart";
     if(move.needsAttention)return "attention";
     var s=move.state, was=move.interruptedState;
     if(s==="awaiting-maintenance"||(s==="paused"&&was==="awaiting-maintenance"))return move.restoredFrom?"interrupted":"ready";
@@ -67,12 +67,14 @@ function moveStage(move,pending) {
     if(s==="switched")return "moved-await-reboot";
     if(s==="rebooted")return "moved";
     if(s==="rolled-back")return "undone";
+    if(s==="returned")return "returned";
     if(s==="cleaned")return "cleaned";
     return "inspect";
 }
 var MOVE_TEXT={
     "move-on-restart":["Moves on next restart","Save your work. During the restart nothing else runs: the folder is copied, every file is checked, and the familiar path then opens the drive."],
     "undo-on-restart":["Undo on next restart","During the restart the original folder is put back and the copy on the drive is removed."],
+    "return-on-restart":["Moves back on next restart","During the restart the latest files are copied back to their original filesystem and checked. The SSD copy is kept; the bind is removed only after verification."],
     "attention":["Needs attention","The move stopped safely. Nothing was deleted; both copies are kept."],
     "ready":["Ready to move","Checked and planned. Schedule it for the next restart; until then the original stays in use."],
     "interrupted":["Interrupted · original restored","The move was cut off, so your original folder was put back unchanged. Restart to try again."],
@@ -81,6 +83,7 @@ var MOVE_TEXT={
     "moved-await-reboot":["Moved","Files now live on the drive. The old copy can be deleted after one normal restart."],
     "moved":["Moved","Files live on the drive and open through the familiar path. The old copy is kept until you delete it."],
     "undone":["Undone","The original folder is back in place."],
+    "returned":["Moved back","The latest files are back on their original filesystem. The SSD copy and any previous original copy are kept."],
     "cleaned":["Moved · old copy deleted","Snapshots may still hold the old data for a while."]
 };
 function moveText(move,pending){return MOVE_TEXT[moveStage(move,pending)];}
@@ -93,9 +96,12 @@ function visibleMoves(moves) {
 }
 function moveActions(move,pending) {
     var stage=moveStage(move,pending), other=pending && pending.moveId && pending.moveId!==move.id;
-    var a={"move-on-restart":["restart","cancel_restart"],"undo-on-restart":["restart","cancel_restart"],
+    var a={"move-on-restart":["restart","cancel_restart"],"undo-on-restart":["restart","cancel_restart"],"return-on-restart":["restart","cancel_restart"],
         "ready":["resume_move","cancel_move"],"interrupted":["resume_move","cancel_move"],"restore-on-restart":["resume_move"],
         "moved-await-reboot":["rollback_move"],"moved":["rollback_move"],"attention":["resume_move"]}[stage]||[];
+    if(stage==="attention" && move.canCancelIncomplete===true)a=["cancel_move"];
+    if(move.state==="paused" && /^return-/.test(move.interruptedState||""))a=move.canMoveBack===true?["move_back"]:[];
+    if(["moved-await-reboot","moved","cleaned"].indexOf(stage)>=0 && move.bound===true && move.canMoveBack===true)a=a.concat(["move_back"]);
     if(stage==="moved" && move.canDelete===true)a=a.concat(["delete_old_copy"]);
     if(other)a=a.filter(function(x){return x==="cancel_move"||x==="delete_old_copy";});
     if(pending && pending.moveId===move.id && pending.thisSession===false)a=a.filter(function(x){return x!=="cancel_restart";});
@@ -151,13 +157,14 @@ function _drivePill(state,drive) {
     return ["check identity","bad"];
 }
 // ---- drives and folders set up by hand ----------------------------------------
-// Same list as PROTECTED in helper/moves.py (a Node test keeps them equal).
-var PROTECTED=[".hermes",".claude",".codex",".codemux",".opencode",".config",".ssh",".gnupg",".mozilla",".password-store","keyrings","chromium","google-chrome","firefox","postgres","postgresql","mysql","mariadb"];
-// Why a home folder can't be moved, or "" when the helper would consider it.
-function moveBlocker(path) {
-    var parts=String(path||"").split("/").filter(function(x){return x!=="";});
-    if(parts.length<3||parts[0]!=="home")return "outside your home folder";
-    for(var i=0;i<parts.length;i++)if(PROTECTED.indexOf(parts[i].toLowerCase())>=0)return "app profile or settings · stays on the OS disk";
+// Only path shape is screened here. Actual ownership/use/tree/topology is
+// assessed by the helper, never inferred from hidden/app/credential names.
+function moveBlocker(path,home) {
+    var p=String(path||""),parts=p.split("/");
+    if(home) {
+        if(p.indexOf(String(home).replace(/\/$/,"")+"/")!==0)return "outside your home folder";
+    } else if(parts.length<4||parts[0]!==""||parts[1]!=="home"||!parts[2])return "outside your home folder";
+    if(parts.slice(1).some(function(x){return x===""||x==="."||x==="..";}))return "Use the exact folder path, without empty, . or .. components.";
     return "";
 }
 // Folder sizes stream in from `bridge.py --sizes`, one JSON line at a time.
@@ -215,17 +222,16 @@ function manualBinds(snapshot,disk) {
 }
 // What fills the OS disk: top-level folders of home (measured on the OS disk
 // only, so folders already on a drive are not counted), biggest first, then
-// everything outside home. Hidden folders are app data: shown, not offered.
+// everything outside home. Hidden and app folders are offered for assessment.
 function spaceRows(snapshot,limit) {
-    var s=snapshot.sizes||{},mounted={},planned={},sys=systemDisks(snapshot)[0],steam=s.steam||"";
-    visibleMoves(snapshot.moves||[]).forEach(function(m){if(FINISHED.indexOf(m.state)<0)planned[m.source]=1;});
+    var s=snapshot.sizes||{},mounted={},planned={},sys=systemDisks(snapshot)[0];
+    visibleMoves(snapshot.moves||[]).forEach(function(m){if(FINISHED.indexOf(m.state)<0&&m.state!=="returned")planned[m.source]=m;});
     (snapshot.mounts||[]).forEach(function(m){mounted[m.target]=1;});
     var all=(s.entries||[]).filter(function(e){return !mounted[e.path]&&e.bytes>0;}).sort(function(a,b){return b.bytes-a.bytes;});
     var rows=all.slice(0,limit===0?all.length:(limit||12)).map(function(e,i){
-        var name=e.path.split("/").pop(),why=moveBlocker(e.path);
-        if(!why&&name.charAt(0)===".")why=steam&&steam.indexOf(e.path+"/")===0?"holds Steam · move the games under Apps":"hidden app folder · stays on the OS disk";
+        var why=moveBlocker(e.path);
         if(!why&&planned[e.path])why="move already planned";
-        return {path:e.path,title:shortPath(e.path),bytes:e.bytes,size:compact(e.bytes),color:i%4,movable:why==="",why:why};
+        return {path:e.path,title:shortPath(e.path),bytes:e.bytes,size:compact(e.bytes),color:i%4,movable:why==="",why:why,moveId:planned[e.path]?planned[e.path].id:""};
     });
     var home=all.reduce(function(a,e){return a+e.bytes;},0);
     if(sys&&sys.usage&&s.done){
@@ -251,10 +257,10 @@ function sizeProgress(sizes,elapsedMs) {
 }
 // A folder typed by hand on the OS-disk screen: absolute path, or "" + why not.
 function typedFolder(text,home) {
-    var p=expandHome(text,home).replace(/\/+$/,"");
+    var p=expandHome(text,home);
     if(p==="")return {path:"",why:""};
     if(p.charAt(0)!=="/")return {path:"",why:"Type a full path, like ~/Videos or /home/you/Games."};
-    var why=moveBlocker(p);
+    var why=moveBlocker(p,home);
     return {path:why?"":p,why:why?shortPath(p)+": "+why:""};
 }
 // OS-disk meter: one segment per listed home folder.
@@ -362,7 +368,6 @@ function targetIssue(r) {
     var d=r.disk||{},u=r.usage;
     if(!u)return "This drive isn't mounted.";
     if(d.bootUnlock!=="keyfile")return "Folders can only move onto a drive that unlocks with the OS (a keyfile in crypttab).";
-    if(u.rootOwned!==true)return "One step first: "+display(u.target)+" belongs to your user, and folders are only moved into a drive folder owned by the system (so no other program can swap things mid-move).";
     return "";
 }
 // The one issue the panel can fix itself: a user-owned top folder.
@@ -380,10 +385,11 @@ function folderRows(snapshot) {
         var stage=moveStage(m,pending),c=idx[m.source+"\u0000"+m.destMount];
         var status=({"moved":m.bound?"● mounted":"● not reachable","moved-await-reboot":m.bound?"● mounted":"● not reachable","cleaned":m.bound?"● mounted":"● not reachable",
             "move-on-restart":"moves on restart","undo-on-restart":"undo on restart","ready":"ready to move","interrupted":"interrupted","restore-on-restart":"interrupted",
-            "attention":"needs attention","inspect":"needs inspection","undone":"undone"})[stage]||stage;
+            "attention":"needs attention","inspect":"needs inspection","undone":"undone","returned":"moved back","return-on-restart":"moves back on restart"})[stage]||stage;
         var tone=status==="● mounted"?"ok":(["● not reachable","needs attention","needs inspection","interrupted"].indexOf(status)>=0?"bad":"dim");
         // The font is monospaced: padding the source lines up the arrows.
         var src=shortPath(m.source),pad=src+new Array(Math.max(0,Math.min(width,28)-src.length)+1).join(" ");
+        if(stage==="returned"||stage==="return-on-restart")return {id:m.id,move:m,source:src,label:pad+" ← "+display(m.sourceMount||"original filesystem"),dest:display(m.sourceMount||"original filesystem"),status:status,tone:stage==="returned"?"ok":"dim",color:-1};
         return {id:m.id,move:m,source:src,label:pad+" → "+display(m.destMount),dest:display(m.destMount),status:status,tone:tone,color:c===undefined?-1:c};
     });
 }
@@ -435,6 +441,7 @@ function dataTotal(snapshot){return compact(dataDrives(snapshot).reduce(function
 // Hero meta for one move: "Moved · on /data", "Ready to move · to /data2".
 function moveMeta(m,pending) {
     var stage=moveStage(m,pending),done=["moved","moved-await-reboot","cleaned"].indexOf(stage)>=0;
+    if(stage==="returned"||stage==="return-on-restart")return moveText(m,pending)[0]+" · back to "+display(m.sourceMount||"original filesystem");
     return moveText(m,pending)[0]+" · "+(done?"on ":"to ")+display(m.destMount);
 }
 // Facts for a move that has not happened yet: size, files, room on the drive.
@@ -442,6 +449,16 @@ function moveFacts(m,snapshot) {
     if(FINISHED.indexOf(m.state)>=0||!m.stats)return "";
     var free=null;dataDrives(snapshot||{}).forEach(function(r){if(r.drive&&r.drive.mountpoint===m.destMount&&r.usage)free=r.usage.free;});
     return compact(m.stats.bytes||0)+" · "+(m.stats.files||0).toLocaleString()+" files"+(free===null?"":" · "+compact(free)+" free on "+display(m.destMount));
+}
+// Only the read-only helper assessment decides whether preparation is needed.
+function moveReview(result) {
+    var name=shortPath(result.source),dest=display(result.destMount),stats=result.stats||{};
+    var text=compact(stats.bytes||0)+" · "+(stats.files||0).toLocaleString()+" files checked.\n"
+        +name+" → "+dest+"\nKeeps its path. Apps use it as before.\n"
+        +"Moves on your next restart; every file is verified. The old copy is kept until you delete it.\n"
+        +"Authorize once to schedule. Restart now is optional.";
+    if(result.needsPreparation===true)text+="\n\nThis also permanently prepares "+dest+" for moves. Only the "+dest+" folder itself becomes owned by the system. Everything inside it stays yours and keeps working. Read access isn't widened. Afterwards, new top-level folders in "+dest+" are made by moving a folder here (or with sudo). This ownership change is not undone by cancelling the move.";
+    return text;
 }
 // What the move detail screen lists as proof (mock F).
 function moveChecks(m) {
@@ -457,11 +474,19 @@ function moveChecks(m) {
 function jobText(job) {
     if(!job)return {title:"Waiting for the helper…",state:"running"};
     var names={ProvisionDrive:"Setting up the drive",ResumeDrive:"Finishing drive setup",UnlockDrive:"Unlocking the drive",ReconnectDrive:"Reconnecting the drive",
-        StartMove:"Planning the move",ResumeMove:"Scheduling the move",RollbackMove:"Scheduling the undo",CancelRestart:"Withdrawing the restart request",
+        AssessMove:"Checking folder safety",ScheduleMove:"Scheduling the move",StartMove:"Planning the move",ResumeMove:"Scheduling the move",RollbackMove:"Scheduling the undo",MoveBack:"Scheduling move back",CancelRestart:"Withdrawing the restart request",
         CancelMove:"Cancelling the move",RestartMove:"Starting over",DeleteOldCopy:"Deleting the old copy",ExportHeaderBackup:"Exporting the header backup"};
     var t=names[job.method]||display(job.method);
-    if(job.state==="done")t=t.replace(/^(\w+)ing/,function(m,w){return {Setting:"Set",Finishing:"Finished",Unlocking:"Unlocked",Reconnecting:"Reconnected",Planning:"Planned",Scheduling:"Scheduled",Withdrawing:"Withdrew",Cancelling:"Cancelled",Starting:"Started",Deleting:"Deleted",Exporting:"Exported"}[w]+"";});
+    if(job.method==="ScheduleMove" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="continue")return {title:"Moves on next restart",state:"done",error:""};
+    if(job.method==="MoveBack" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="return")return {title:"Moves back on next restart",state:"done",error:""};
+    if(job.method==="AssessMove" && job.state==="done")return {title:"Safety checked",state:"done",error:""};
+    if(job.state==="done")t=t.replace(/^(\w+)ing/,function(m,w){return {Setting:"Set",Finishing:"Finished",Unlocking:"Unlocked",Reconnecting:"Reconnected",Planning:"Planned",Scheduling:"Scheduled",Withdrawing:"Withdrew",Cancelling:"Cancelled",Starting:"Started",Deleting:"Deleted",Exporting:"Exported"}[m]+"";});
     return {title:t,state:job.state,error:display(job.error)};
+}
+function jobFailureHint(job) {
+    if(job && job.method==="AssessMove")return "assessment refused · nothing moved";
+    if(job && job.method==="ScheduleMove")return "stopped · preparation may have happened; inspect the error and move records";
+    return "stopped · inspect the error and recorded state";
 }
 // A refusal that only said the drive was missing is stale once that drive is
 // mounted again; any other error (or attention state) is always shown.
@@ -471,7 +496,7 @@ function showMoveError(m,snapshot) {
     return !dataDrives(snapshot||{}).some(function(r){return r.drive&&r.drive.mountpoint===m.destMount&&r.state==="Mounted";});
 }
 // Turn "~/x" into an absolute path under the user's home.
-function expandHome(p,home){p=String(p||"").trim();return p==="~"?home:(p.indexOf("~/")===0?home+p.slice(1):p);}
+function expandHome(p,home){p=String(p||"");return p==="~"?home:(p.indexOf("~/")===0?home+p.slice(1):p);}
 function rate(n){return bytes(n)+"/s";}
 function ioText(r){return r?"Read "+rate(r.read)+" · Write "+rate(r.write):"";}
 // Folders moved onto a mounted drive, with their size when moved.

@@ -4,8 +4,8 @@ DefaultDependencies=no
 ConditionPathExists=/drives-maintenance-request.json
 ConditionPathExists=/run/drives-maintenance/boot.json
 # Ordered after the target but deliberately not Requisite: if the target fails
-# the worker still runs, its audit refuses, and the machine boots normally
-# instead of stalling at a blank maintenance screen.
+# the worker still runs and its audit refuses. Known untouched state can boot
+# normally; ambiguous recovery keeps the persistent normal-startup barrier.
 After=drives-maintenance.target
 Conflicts=shutdown.target
 Before=shutdown.target
