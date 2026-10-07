@@ -137,7 +137,7 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 | Crash at copying, verifying, placeholder, fstab, quarantine-prepared | Original restored unchanged, move paused. |
 | Crash during Undo | Undo finished on the next boot. |
 | Undo after a new file was added | Refused; new file kept. |
-| Unreadable subtree, FIFO, nested mount, outside hardlink, too little space | Refused with a clear message. Names such as `.config` or `.ssh` no longer decide admission. |
+| Nested mount, outside hardlink, too little space | Refused with a clear message. Files owned by other users, unreadable to the caller, FIFOs and sockets move. Names such as `.config` or `.ssh` no longer decide admission. |
 | Folder in use by a background service and a running program | Named in the review, not refused; moved and undone across restarts with identical checksums; the service restarted by itself. |
 | Destination unplugged before the maintenance boot | "Drive not connected"; nothing changed; folder still usable. |
 | Drive re-plugged after boot | Reconnect from the panel brings back the drive and its moved folder; checksum identical. |

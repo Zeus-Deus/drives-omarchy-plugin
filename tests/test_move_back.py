@@ -130,7 +130,7 @@ def test_return_active_use_is_only_refused_inside_maintenance(tmp_path,monkeypat
 
 
 @pytest.mark.parametrize('unsafe',['protocol','state','foreign-bind','nested-source','nested-dest','stacked-bind','parent',
-    'source-mount','uuid','root-readonly','special','external-link','space','foreign-fstab','manual-fstab','ownership','no-private'])
+    'source-mount','uuid','root-readonly','external-link','space','foreign-fstab','manual-fstab','ownership','no-private'])
 def test_return_admission_refuses_unsafe_inputs_without_arming(tmp_path,monkeypatch,unsafe):
     manager,j,tab,ownership,rows,topology=admission_fixture(tmp_path,monkeypatch)
     monkeypatch.setattr(manager,'latch',lambda *a:pytest.fail('unsafe return armed'))
@@ -143,7 +143,6 @@ def test_return_admission_refuses_unsafe_inputs_without_arming(tmp_path,monkeypa
     elif unsafe=='source-mount':j['sourceMount']='/data'
     elif unsafe=='uuid':topology['chain'][0]['uuid']='FOREIGN'
     elif unsafe=='root-readonly':topology['mount']['options']='ro'
-    elif unsafe=='special':os.mkfifo(pathlib.Path(j['dest'])/'pipe')
     elif unsafe=='external-link':os.link(pathlib.Path(j['dest'])/'latest',tmp_path/'outside-hardlink')
     elif unsafe=='space':monkeypatch.setattr(os,'statvfs',lambda p:type('V',(),{'f_bavail':0,'f_frsize':4096})())
     elif unsafe=='foreign-fstab':tab.write_text(tab.read_text().replace(offline.fstab_line(j),'FOREIGN '+j['source']+' none bind 0 0'))

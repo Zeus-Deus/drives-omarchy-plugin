@@ -50,9 +50,11 @@ startup stays blocked for administrator recovery. An invalid request is not
 permission to start applications against an absent or uncertain profile.
 
 What will not move: a folder outside your own home, the whole home directory,
-an existing or nested mount, a Btrfs subvolume root, unreadable files,
-FIFOs/devices, and files hardlinked from outside the folder (the panel names
-an example file). Leftover socket files are moved like other files. The panel says why instead of skipping anything.
+an existing or nested mount, a Btrfs subvolume root, and files hardlinked from
+outside the folder (the panel names an example file). Everything else moves
+exactly as `sudo rsync -a` would copy it: files owned by other users or not
+readable by you, sockets, FIFOs and device nodes keep their owner and mode.
+Your administrator password is the permission; the panel never skips a file.
 Links inside a folder are preserved as links, without copying their targets.
 Closed SQLite databases and app settings are assessed like other files;
 this is not a promise of compatibility with every application's storage setup.

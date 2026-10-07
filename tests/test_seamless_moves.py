@@ -52,11 +52,15 @@ def test_internal_dangling_and_real_symlinks_remain_supported(home):
     (source/'real').symlink_to('item');(source/'dangling').symlink_to('missing')
     assert moves.tree_stats(str(source),CALLER)['files']==1
 
-def test_unreadable_source_root_refused(home):
-    source=folder(home,'.config');source.chmod(0o000)
+def test_permissions_never_decide_admission(home):
+    # The helper copies as root; a mode-000 folder is only unreadable to a
+    # non-root test run, where the error must still name the path.
+    source=folder(home,'.config');(source/'inner').mkdir();(source/'inner'/'f').write_text('x');(source/'inner').chmod(0o000)
     try:
-        with pytest.raises(Failure,match='cannot read .*not readable by you'):moves.tree_stats(str(source),CALLER)
-    finally:source.chmod(0o700)
+        if os.geteuid()==0:assert moves.tree_stats(str(source),CALLER)['files']==1
+        else:
+            with pytest.raises(Failure,match='could not read .*inner'):moves.tree_stats(str(source),CALLER)
+    finally:(source/'inner').chmod(0o700)
 
 @pytest.mark.parametrize('kind',['fd','cwd','root','exe','mmap','deleted-mmap','escaped-mmap'])
 def test_actual_use_including_mmap_and_executable_is_refused(home,tmp_path,kind):
@@ -77,7 +81,7 @@ def test_open_users_names_the_systemd_unit(home,tmp_path):
     assert moves.open_users(str(source),proc_root=proc)==[{'pid':123,'name':'python3','unit':'hermes-serve.service'}]
 
 
-def test_leftover_sockets_move_but_fifos_are_refused_with_the_path(home):
+def test_sockets_and_fifos_move_like_any_file(home):
     import socket
     source=folder(home,'.hermes');(source/'sub').mkdir()
     # Bind relative to the folder: pytest temp paths exceed the AF_UNIX limit.
@@ -86,7 +90,7 @@ def test_leftover_sockets_move_but_fifos_are_refused_with_the_path(home):
     finally:os.chdir(cwd)
     assert moves.tree_stats(str(source),CALLER)['files']==0
     os.mkfifo(source/'sub'/'pipe')
-    with pytest.raises(Failure,match='sub/pipe'):moves.tree_stats(str(source),CALLER)
+    assert moves.tree_stats(str(source),CALLER)['files']==0
 
 
 def test_outside_hardlink_refusal_names_an_example_file(home,tmp_path):
@@ -160,14 +164,13 @@ def test_assessment_is_readonly_and_reports_required_preparation(admission,monke
     assert a.c.records('moves')==[] and a.c.records('drives')==[]
     assert (pathlib.Path(a.dest)/'existing').read_bytes()==b'untouched fixture'
 
-@pytest.mark.parametrize('kind',['special','nested','hardlink','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
+@pytest.mark.parametrize('kind',['nested','hardlink','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
 def test_assessment_checks_real_refusals_before_any_preparation(admission,monkeypatch,kind):
     from helper import preparedrive,offline,maintenance
     import topology
     a=admission
     monkeypatch.setattr(preparedrive,'run_isolated',lambda *a,**k:pytest.fail('refusal prepared destination'))
-    if kind=='special':os.mkfifo(pathlib.Path(a.src)/'pipe')
-    elif kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/nested'})
+    if kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/nested'})
     elif kind=='hardlink':os.link(pathlib.Path(a.src)/'state.sqlite',pathlib.Path(a.dest)/'alias')
     elif kind=='space':monkeypatch.setattr(moves.os,'statvfs',lambda p:types.SimpleNamespace(f_bavail=0,f_frsize=4096))
     elif kind=='keyfile':monkeypatch.setattr(offline,'crypttab_key',lambda m:(_ for _ in ()).throw(Failure('fixture missing keyfile')))
@@ -324,8 +327,8 @@ def test_cancel_parent_identity_survives_reboot_device_renumbering(scheduling,mo
 
 def test_schedule_repeats_admission_never_trusts_assessment(scheduling,monkeypatch):
     a=scheduling;assert a.m.assess(a.src,a.dest)['ok']
-    os.mkfifo(pathlib.Path(a.src)/'late-pipe')
-    with pytest.raises(Failure,match='special'):a.m.schedule_move(a.src,a.dest,True)
+    a.rows.append({**a.rows[0],'target':a.src+'/late-mount'})
+    with pytest.raises(Failure,match='nested'):a.m.schedule_move(a.src,a.dest,True)
     assert a.calls==[] and a.c.records('moves')==[]
 
 def test_apps_using_the_folder_are_reported_not_refused(admission,monkeypatch):
@@ -346,24 +349,24 @@ def test_maintenance_boot_still_refuses_any_user_process():
     assert "if process['uid']!=[0,0,0,0]:raise Failure('non-root process blocks maintenance')" in src
     assert "if snapshot['sessions'] or snapshot['jobs']:raise Failure" in src
 
-@pytest.mark.parametrize('kind',['special','keyfile','journal','pending'])
+@pytest.mark.parametrize('kind',['nested','keyfile','journal','pending'])
 def test_schedule_all_checks_before_preparation(scheduling,monkeypatch,kind):
     from helper import maintenance,offline
     a=scheduling
-    if kind=='special':os.mkfifo(pathlib.Path(a.src)/'pipe')
+    if kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/nested'})
     elif kind=='keyfile':monkeypatch.setattr(offline,'crypttab_key',lambda m:(_ for _ in ()).throw(Failure('fixture no key')))
     elif kind=='journal':a.c.journal('moves','a'*32,{'id':'a'*32,'state':'awaiting-maintenance','source':a.src})
     else:maintenance.LATCH.write_bytes(b'fixture malformed')
     with pytest.raises(Failure):a.m.schedule_move(a.src,a.dest,True)
     assert a.calls==[]
 
-@pytest.mark.parametrize('kind',['special','source-replaced','dest-replaced','topology-changed','prepare-failed','create-failed','latch-failed','journal-failed'])
+@pytest.mark.parametrize('kind',['nested','source-replaced','dest-replaced','topology-changed','prepare-failed','create-failed','latch-failed','journal-failed'])
 def test_partial_schedule_failure_retains_journal_and_discloses_preparation(scheduling,monkeypatch,kind):
     from helper import preparedrive
     a=scheduling;prepare=preparedrive.run_isolated
     def raced(path,expected=None):
         result=prepare(path,expected)
-        if kind=='special':os.mkfifo(pathlib.Path(a.src)/'late-pipe')
+        if kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/late-mount'})
         elif kind in ('source-replaced','dest-replaced'):
             p=pathlib.Path(a.src if kind=='source-replaced' else a.dest);p.rename(p.with_name(p.name+'-original'));p.mkdir()
             if os.geteuid()==0 and kind=='source-replaced':os.chown(p,CALLER,CALLER)
@@ -383,7 +386,7 @@ def test_partial_schedule_failure_retains_journal_and_discloses_preparation(sche
     assert a.c.records('moves'), 'inspectable plan must survive failed scheduling'
     assert 'destination' not in a.calls if kind not in ('latch-failed',) else True
 
-@pytest.mark.parametrize('kind',['special-file','nested-mount'])
+@pytest.mark.parametrize('kind',['outside-hardlink','nested-mount'])
 def test_maintenance_rechecks_tree_before_quarantine(admission,monkeypatch,kind):
     from helper import offline
     a=admission;w=offline.Offline(a.c)
@@ -396,9 +399,9 @@ def test_maintenance_rechecks_tree_before_quarantine(admission,monkeypatch,kind)
     monkeypatch.setattr(w,'restore',lambda *a:pytest.fail('invalid source reached restoration after quarantine'))
     monkeypatch.setattr(offline,'say',lambda *a:None)
     monkeypatch.setattr(offline,'mount_rows',lambda:a.rows)
-    if kind=='special-file':os.mkfifo(pathlib.Path(a.src)/'late-pipe')
+    if kind=='outside-hardlink':os.link(pathlib.Path(a.src)/'state.sqlite',pathlib.Path(a.dest)/'late-alias')
     else:a.rows.append({**a.rows[0],'target':a.src+'/nested'})
-    with pytest.raises(Failure,match='special|nested'):w.continue_move(j)
+    with pytest.raises(Failure,match='hard link|hardlink|nested'):w.continue_move(j)
 
 
 def test_source_replaced_during_assessment_is_refused_before_preparation(admission,monkeypatch):
@@ -425,7 +428,7 @@ def test_literal_proc_escape_in_directory_name_still_detects_mapping(home,tmp_pa
     assert moves.open_users(str(source),proc_root=proc)
 
 
-def test_root_private_ancestor_cannot_be_used_to_expose_owned_source(home,monkeypatch):
+def test_root_private_parent_inside_home_is_accepted(home,monkeypatch):
     parent=home/'private';parent.mkdir();source=folder(parent,'data');actual=pathlib.Path.stat
     def private(p,*args,**kwargs):
         s=actual(p,*args,**kwargs)
@@ -434,7 +437,9 @@ def test_root_private_ancestor_cannot_be_used_to_expose_owned_source(home,monkey
             return os.stat_result(values)
         return s
     monkeypatch.setattr(pathlib.Path,'stat',private)
-    with pytest.raises(Failure,match='ancestor|cannot read'):moves.protected(str(source),CALLER)
+    # Authorization comes from the administrator prompt, not from who owns a
+    # parent folder: a root-private parent inside your home no longer refuses.
+    assert moves.protected(str(source),CALLER)==CALLER
 
 
 def test_wake_starts_only_a_configured_idle_automount(tmp_path,monkeypatch):
@@ -472,9 +477,19 @@ def test_user_operations_wake_the_drive_but_status_never_does():
         assert 'self.wake(' not in inspect.getsource(getattr(moves.MoveManager,name)),name
 
 
-def test_unreadable_entry_is_named_with_its_owner(home):
+def test_files_owned_by_others_or_unreadable_still_move(home):
     source=home/'named';(source/'inner').mkdir(parents=True);bad=source/'inner'/'root-file.json';bad.write_text('x')
     os.chmod(bad,0)
-    try:
-        with pytest.raises(Failure,match='cannot read .*inner/root-file.json \\(not readable by you\\); fix its permissions or delete it'):moves.tree_stats(str(source),CALLER)
+    if os.geteuid()==0:os.chown(bad,0,0)
+    try:assert moves.tree_stats(str(source),CALLER)['files']==1
     finally:os.chmod(bad,0o600)
+
+
+def test_source_folder_owned_by_another_user_is_accepted(home,monkeypatch):
+    source=folder(home,'shared');actual=pathlib.Path.stat
+    def foreign(p,*args,**kwargs):
+        s=actual(p,*args,**kwargs)
+        if p==source:values=list(s);values[4]=0;return os.stat_result(values)
+        return s
+    monkeypatch.setattr(pathlib.Path,'stat',foreign)
+    assert moves.protected(str(source),CALLER)==CALLER

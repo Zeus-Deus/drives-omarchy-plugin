@@ -78,9 +78,9 @@ drives, when the helper is reinstalled.
 ## Moving a folder (protocol 2)
 
 1. **Assess (normal session).** Hidden/profile/credential/database names do
-   not decide admission. Require a caller-owned ordinary directory strictly
-   inside the actual caller's home. Refuse unreadable entries (naming the path and whether another user owns it), FIFOs and
-   device nodes (naming the path), existing/nested mounts, source subvolume
+   not decide admission. Require an ordinary directory strictly inside the
+   actual caller's home (any owner). Ownership, permissions and file type never refuse: the root copy keeps
+   owners, modes, sockets, FIFOs and device nodes exactly. Refuse existing/nested mounts, source subvolume
    roots, external hardlinks (naming an example), a destination other than a
    non-system encrypted Btrfs root mount with keyfile unlock, or less than 1.2×
    source apparent size free. Symlinks inside the tree are copied as links;

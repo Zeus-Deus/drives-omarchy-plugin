@@ -113,14 +113,9 @@ def protected(path,uid=None):
     system_roots={'etc','usr','bin','sbin','lib','lib64','var','run','proc','sys','dev','boot','opt','tmp'}
     if len(home.parts)<3 or home.parts[1] in system_roots or p==home or home not in p.parents:raise Failure('protected path: choose a folder inside your own home, not the whole home or a system directory')
     if not stat.S_ISDIR(s.st_mode):raise Failure('source must be a real directory')
-    if s.st_uid!=uid:raise Failure('source is not owned by the caller')
     if home.stat().st_uid!=uid:raise Failure('caller home is not owned by the caller')
-    groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
-    for ancestor in p.parents:
-        info=ancestor.stat()
-        permission=(info.st_mode>>6)&7 if info.st_uid==uid else ((info.st_mode>>3)&7 if info.st_gid in groups else info.st_mode&7)
-        if not permission&1:raise Failure('unreadable ancestor: caller cannot reach this folder')
-        if ancestor==home:break
+    # Scheduling already requires administrator authentication; a folder in
+    # your home owned by another user (or behind a private parent) moves too.
     return uid
 
 def open_users(path,proc_root='/proc'):
@@ -175,18 +170,14 @@ def _shown(path):
     return os.fsdecode(path).encode('utf-8','replace').decode('utf-8')[:160]
 
 def tree_stats(path,uid=None,progress=None):
-    count=0;size=0;directories=0;h=hashlib.sha256();groups=set();seen=0
-    if uid is not None:
-        user=pwd.getpwuid(uid);groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
-    def unreadable(exc):raise Failure('cannot read '+_shown(getattr(exc,'filename','') or path)+'; nothing is skipped silently, so fix its permissions or delete it, then check again') from exc
-    def readable(s,p):
-        if uid is None or stat.S_ISLNK(s.st_mode):return
-        permission=(s.st_mode>>6)&7 if s.st_uid==uid else ((s.st_mode>>3)&7 if s.st_gid in groups else s.st_mode&7)
-        need=5 if stat.S_ISDIR(s.st_mode) else 4
-        if permission&need!=need:
-            who='owned by another user' if s.st_uid!=uid else 'not readable by you'
-            raise Failure('cannot read '+_shown(p)+' ('+who+'); fix its permissions or delete it, then check again')
-    root_info=os.lstat(path);readable(root_info,path)
+    # The copy runs as root (rsync -aHAXS --numeric-ids), like `sudo` in a
+    # terminal: files owned by other users, files the caller cannot read, and
+    # FIFOs, sockets and device nodes are all copied exactly with their owner
+    # and mode. Only things that would break the result are refused below.
+    # uid is kept for API compatibility; access is never judged per user.
+    count=0;size=0;directories=0;h=hashlib.sha256();seen=0
+    def unreadable(exc):raise Failure('could not read '+_shown(getattr(exc,'filename','') or path)+' even as administrator ('+(exc.strerror or 'I/O error')+'); nothing is skipped silently') from exc
+    root_info=os.lstat(path)
     if not stat.S_ISDIR(root_info.st_mode):raise Failure('source must be a real directory')
     links={}  # (dev, ino) -> [link count, names seen inside this tree]
     # Sort within each directory, not one million entries in memory.
@@ -194,16 +185,12 @@ def tree_stats(path,uid=None,progress=None):
         dirs.sort();files.sort();directories+=1
         for name in dirs+files:
             p=os.path.join(root,name);s=os.lstat(p);rel=os.fsencode(os.path.relpath(p,path))
-            readable(s,p)
             if s.st_dev!=root_info.st_dev:raise Failure('nested filesystem blocks the move')
             # rsync -a preserves the link itself, never its referent. Relative
             # and absolute external links keep their meaning through the
             # familiar bind path; rejecting them would block ordinary profiles.
-            # A socket is a dead rendezvous name once its owner has exited (and
-            # nothing runs in the maintenance boot); rsync -a recreates it.
-            # FIFOs and device nodes are still refused.
-            if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or stat.S_ISSOCK(s.st_mode)):
-                raise Failure('special file refused (FIFO or device): '+_shown(p))
+            # Sockets, FIFOs and device nodes are names, not data; nothing runs
+            # in the maintenance boot and rsync -a recreates each exactly.
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
             if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:
                 links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0,p])[1]+=1
