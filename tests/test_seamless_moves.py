@@ -55,7 +55,7 @@ def test_internal_dangling_and_real_symlinks_remain_supported(home):
 def test_unreadable_source_root_refused(home):
     source=folder(home,'.config');source.chmod(0o000)
     try:
-        with pytest.raises(Failure,match='unreadable'):moves.tree_stats(str(source),CALLER)
+        with pytest.raises(Failure,match='cannot read .*not readable by you'):moves.tree_stats(str(source),CALLER)
     finally:source.chmod(0o700)
 
 @pytest.mark.parametrize('kind',['fd','cwd','root','exe','mmap','deleted-mmap','escaped-mmap'])
@@ -434,7 +434,7 @@ def test_root_private_ancestor_cannot_be_used_to_expose_owned_source(home,monkey
             return os.stat_result(values)
         return s
     monkeypatch.setattr(pathlib.Path,'stat',private)
-    with pytest.raises(Failure,match='ancestor|unreadable'):moves.protected(str(source),CALLER)
+    with pytest.raises(Failure,match='ancestor|cannot read'):moves.protected(str(source),CALLER)
 
 
 def test_wake_starts_only_a_configured_idle_automount(tmp_path,monkeypatch):
@@ -470,3 +470,11 @@ def test_user_operations_wake_the_drive_but_status_never_does():
         assert 'self.wake(' in inspect.getsource(getattr(moves.MoveManager,name)),name
     for name in ('inspect','bound','destination'):
         assert 'self.wake(' not in inspect.getsource(getattr(moves.MoveManager,name)),name
+
+
+def test_unreadable_entry_is_named_with_its_owner(home):
+    source=home/'named';(source/'inner').mkdir(parents=True);bad=source/'inner'/'root-file.json';bad.write_text('x')
+    os.chmod(bad,0)
+    try:
+        with pytest.raises(Failure,match='cannot read .*inner/root-file.json \\(not readable by you\\); fix its permissions or delete it'):moves.tree_stats(str(source),CALLER)
+    finally:os.chmod(bad,0o600)

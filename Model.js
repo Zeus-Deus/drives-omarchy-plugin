@@ -124,7 +124,7 @@ function health(disk,report) {
     if(h.temperature)label+=" · "+h.temperature+"°C";
     // smartmontools is not part of a stock Omarchy install; offer the exact command.
     var missing=h.reason==="smartmontools is not installed";
-    return {state:h.state,label:missing?"Health: needs smartmontools":label,reason:missing?"Health checks need smartmontools. Install it with: "+SMART_INSTALL:display(h.reason),install:missing};
+    return {state:h.state,label:missing?"Health: needs smartmontools":label,reason:missing?"Health checks need smartmontools.":display(h.reason),install:missing};
 }
 // Read/write rates (bytes/s) per disk name from two status snapshots.
 function ioRates(prev,cur) {

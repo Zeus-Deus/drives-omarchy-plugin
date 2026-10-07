@@ -57,10 +57,10 @@ def test_dormant_profile_inside_tree_is_allowed(tmp_path):
 def test_walk_error_is_not_a_silent_skip(tmp_path,monkeypatch):
     from helper import moves
     def broken(path,**kwargs):
-        if kwargs.get('onerror'):kwargs['onerror'](PermissionError('fixture denied'))
+        if kwargs.get('onerror'):e=PermissionError('fixture denied');e.filename=path+'/locked';kwargs['onerror'](e)
         return iter(())
     monkeypatch.setattr(moves.os,'walk',broken)
-    with pytest.raises(Failure,match='unreadable subtree'):tree_stats(str(tmp_path))
+    with pytest.raises(Failure,match='cannot read .*/locked; nothing is skipped silently'):tree_stats(str(tmp_path))
 
 
 def test_hardlink_to_outside_the_folder_is_refused(tmp_path):

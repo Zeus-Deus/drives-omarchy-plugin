@@ -36,7 +36,7 @@ test('health labels come from the helper verdict and never guess healthy',()=>{c
  assert.equal(m.health(d,{disks:{S1:{state:'unavailable',reason:'SMART is not available through this USB adapter'}}}).label,'Health: not available');
  const missing=m.health(d,{disks:{'*':{state:'unavailable',reason:'smartmontools is not installed'}}});
  assert.equal(missing.label,'Health: needs smartmontools');assert.equal(missing.install,true);
- assert.match(missing.reason,/omarchy pkg add smartmontools/);assert.equal(m.SMART_INSTALL,'omarchy pkg add smartmontools');});
+ assert.equal(missing.reason,'Health checks need smartmontools.','the install row carries the command; no duplicate');assert.equal(m.SMART_INSTALL,'omarchy pkg add smartmontools');});
 test('a failing or warning disk turns the bar red',()=>{const m=model();const disks=[{serial:'S1',usage:[]}];
  assert.equal(m.warning({disks,health:{disks:{S1:{state:'failing'}}}}),true);assert.equal(m.warning({disks,health:{disks:{S1:{state:'warning'}}}}),true);
  assert.equal(m.warning({disks,health:{disks:{S1:{state:'passed'}}}}),false);assert.equal(m.warning({disks,health:{disks:{S1:{state:'unavailable'}}}}),false);});

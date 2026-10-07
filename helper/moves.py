@@ -178,13 +178,15 @@ def tree_stats(path,uid=None,progress=None):
     count=0;size=0;directories=0;h=hashlib.sha256();groups=set();seen=0
     if uid is not None:
         user=pwd.getpwuid(uid);groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
-    def unreadable(exc):raise Failure('unreadable subtree; refusing a silent skip') from exc
-    def readable(s):
+    def unreadable(exc):raise Failure('cannot read '+_shown(getattr(exc,'filename','') or path)+'; nothing is skipped silently, so fix its permissions or delete it, then check again') from exc
+    def readable(s,p):
         if uid is None or stat.S_ISLNK(s.st_mode):return
         permission=(s.st_mode>>6)&7 if s.st_uid==uid else ((s.st_mode>>3)&7 if s.st_gid in groups else s.st_mode&7)
         need=5 if stat.S_ISDIR(s.st_mode) else 4
-        if permission&need!=need:raise Failure('unreadable subtree: close its owner and fix permissions before moving')
-    root_info=os.lstat(path);readable(root_info)
+        if permission&need!=need:
+            who='owned by another user' if s.st_uid!=uid else 'not readable by you'
+            raise Failure('cannot read '+_shown(p)+' ('+who+'); fix its permissions or delete it, then check again')
+    root_info=os.lstat(path);readable(root_info,path)
     if not stat.S_ISDIR(root_info.st_mode):raise Failure('source must be a real directory')
     links={}  # (dev, ino) -> [link count, names seen inside this tree]
     # Sort within each directory, not one million entries in memory.
@@ -192,7 +194,7 @@ def tree_stats(path,uid=None,progress=None):
         dirs.sort();files.sort();directories+=1
         for name in dirs+files:
             p=os.path.join(root,name);s=os.lstat(p);rel=os.fsencode(os.path.relpath(p,path))
-            readable(s)
+            readable(s,p)
             if s.st_dev!=root_info.st_dev:raise Failure('nested filesystem blocks the move')
             # rsync -a preserves the link itself, never its referent. Relative
             # and absolute external links keep their meaning through the

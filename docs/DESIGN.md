@@ -79,7 +79,7 @@ drives, when the helper is reinstalled.
 
 1. **Assess (normal session).** Hidden/profile/credential/database names do
    not decide admission. Require a caller-owned ordinary directory strictly
-   inside the actual caller's home. Refuse unreadable subtrees, FIFOs and
+   inside the actual caller's home. Refuse unreadable entries (naming the path and whether another user owns it), FIFOs and
    device nodes (naming the path), existing/nested mounts, source subvolume
    roots, external hardlinks (naming an example), a destination other than a
    non-system encrypted Btrfs root mount with keyfile unlock, or less than 1.2×
