@@ -97,10 +97,10 @@ test('read-only safety assessment precedes Cancel-default review and one schedul
     assert.equal(c.confirm.selectedIndex, 0);
     assert.match(c.confirm.message, /7 files/);
     assert.match(c.confirm.message, /next restart/);
-    assert.match(c.confirm.message, /old copy is kept/);
-    assert.match(c.confirm.message, /Only the \/data folder itself becomes owned by the system\. Everything inside it stays yours and keeps working\./);
-    assert.match(c.confirm.message, /new top-level folders in \/data are made by moving a folder here \(or with sudo\)/);
-    assert.match(c.confirm.message, /permanent/i);
+    assert.match(c.confirm.message, /old copy stays until you delete it/);
+    assert.match(c.confirm.message, /First move to \/data: its top folder becomes system-owned for good\. Your files stay yours\./);
+    assert.ok(c.confirm.message.length<420,'review stays short enough to fit the panel');
+    assert.match(c.confirm.message, /for good/i,'the one-way ownership change is still disclosed');
     c.confirmationAction();
     assert.deepEqual(plain(c.requests[1]), {op:'schedule_move',src:'/home/u/.config',destMount:'/data',prepareDestination:true});
     assert.equal(c.requests.length, 2, 'no separate PrepareDrive or ResumeMove');
@@ -124,7 +124,7 @@ for (const [label, change] of [
     const c=panel();assessed(c);const fn=c.confirmationAction;change(c);fn();assert.equal(c.requests.length,1);
 });
 test('no preparation consent is sent for an already safe mount',()=>{
-    const c=panel();assessed(c,false);assert.doesNotMatch(c.confirm.message,/permanently|owned by the system/);c.confirmationAction();
+    const c=panel();assessed(c,false);assert.doesNotMatch(c.confirm.message,/for good|system-owned/);c.confirmationAction();
     assert.equal(c.requests[1].prepareDestination,false);c.confirmationAction && c.confirmationAction();assert.equal(c.requests.length,2);
 });
 test('a failed assessment explains actual use and Retry reassesses',()=>{
@@ -341,17 +341,17 @@ test('apps using the folder are named in the review instead of refusing',()=>{
     assert.equal(g.length,3);assert.equal(g[0].label,'hermes-serve');assert.equal(g[0].kind,'service');
     assert.equal(g[1].label,'Chromium');assert.equal(g[1].count,3);
     const text=m.inUseText(inUse);
-    assert.match(text,/the hermes-serve background service/);assert.match(text,/Chromium \(npm exec vite, node-MainThread, esbuild\)/);
-    assert.match(text,/restart closes them cleanly/);assert.match(text,/services start again on their own/);
+    assert.equal(text,'Open now: hermes-serve, Chromium and hermes. The restart closes them cleanly.');
     assert.doesNotMatch(text,/pid|cwd|mmap/);
     const review=m.moveReview({source:'/home/u/.hermes',destMount:'/data',stats:{bytes:1,files:2},inUse});
-    assert.match(review,/In use by/);assert.match(review,/password is asked once/);assert.doesNotMatch(review,/Restart now is optional/);
-    assert.doesNotMatch(text,/hermes-serve background service \(/,'no raw process names after a service');
-    assert.equal(m.inUseText([]),'');assert.doesNotMatch(m.moveReview({source:'/home/u/V',destMount:'/data',stats:{}}),/In use/);
+    assert.match(review,/Open now:/);assert.doesNotMatch(review,/Restart now is optional/);
+    const launched=m.inUseText([{pid:1,name:'hermes',unit:'app-Hyprland-xdg\\x2dterminal\\x2dexec-9.scope'},{pid:2,name:'Hermes',unit:'app-Hyprland-gtk\\x2dlaunch-12.scope'}]);
+    assert.equal(launched,'Open now: a terminal and Hermes. The restart closes them cleanly.','launcher scopes are unescaped and named by what they run');
+    assert.equal(m.inUseText([]),'');assert.doesNotMatch(m.moveReview({source:'/home/u/V',destMount:'/data',stats:{}}),/Open now/);
 });
 test('in-use names are sanitized and the list is bounded',()=>{
     const m=model();const many=[];for(let i=0;i<20;i++)many.push({pid:i,name:'x\u202e'+i+'\nline'});
-    const t=m.inUseText(many);assert.doesNotMatch(t,/[\u202e\n]/);assert.match(t,/16 more/);
+    const t=m.inUseText(many);assert.doesNotMatch(t,/[\u202e\n]/);assert.match(t,/17 more/);
 });
 test('assessment progress line shows items checked and elapsed time',()=>{
     const m=model();

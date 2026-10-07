@@ -468,8 +468,10 @@ function moveFacts(m,snapshot) {
 // Who is using a folder right now, grouped the way a person thinks of it:
 // one line per app or background service, never a raw pid list.
 // [{label, kind:"service"|"app", names:[process names], count}]
+var LAUNCHERS={"xdg-terminal-exec":"a terminal","gtk-launch":"","uwsm-app":"","omarchy-launch-or-focus":""};
 function _unitApp(unit) {
-    var u=String(unit||"");
+    // systemd escapes "-" in unit names as \x2d; show what people typed.
+    var u=String(unit||"").replace(/\\x([0-9a-fA-F]{2})/g,function(_,h){return String.fromCharCode(parseInt(h,16));});
     if(/\.service$/.test(u))return {key:u,label:u.replace(/\.service$/,"").replace(/^app-/,"").replace(/@.*$/,""),kind:"service"};
     var m=u.match(/^app-(.+?)(?:-[0-9a-f]{6,}|-[0-9]+)?\.scope$/);
     if(m){var id=m[1].replace(/^Hyprland-/,"").replace(/^uwsm-/,"");var parts=id.split(".");return {key:u,label:parts[parts.length-1]||id,kind:"app"};}
@@ -480,6 +482,8 @@ function inUseGroups(list) {
     (list||[]).forEach(function(p){
         if(!p||typeof p.pid!=="number")return;
         var app=_unitApp(p.unit)||{key:"proc:"+display(p.name),label:display(p.name)||"a program",kind:"app"};
+        // A launcher scope (gtk-launch, xdg-terminal-exec) says nothing; name what it started.
+        if(app.kind==="app"&&LAUNCHERS.hasOwnProperty(app.label))app={key:app.key,label:LAUNCHERS[app.label]||display(p.name)||"a program",kind:"app"};
         var g=by[app.key];
         if(!g){g=by[app.key]={label:display(app.label),kind:app.kind,names:[],count:0};groups.push(g);}
         g.count++;var n=display(p.name);if(n&&g.names.indexOf(n)<0&&g.names.length<3&&n!==g.label)g.names.push(n);
@@ -490,28 +494,23 @@ function inUseGroups(list) {
 // the hermes-serve background service."
 function inUseText(list) {
     var g=inUseGroups(list);if(!g.length)return "";
-    var parts=g.slice(0,4).map(function(x){
-        // A service's own name is what the user knows; its process names are noise.
-        if(x.kind==="service")return "the "+x.label+" background service";
-        return x.label+(x.names.length?" ("+x.names.join(", ")+")":"");
-    });
-    if(g.length>4)parts.push(String(g.length-4)+" more");
+    // Names only: what is open, not which processes. Short enough to scan.
+    var labels=[];g.forEach(function(x){if(labels.indexOf(x.label)<0)labels.push(x.label);});
+    var parts=labels.slice(0,3);
+    if(labels.length>3)parts.push(String(labels.length-3)+" more");
     var joined=parts.length===1?parts[0]:parts.slice(0,-1).join(", ")+" and "+parts[parts.length-1];
-    var services=g.some(function(x){return x.kind==="service";}),apps=g.some(function(x){return x.kind!=="service";});
-    return "In use by "+joined+". The restart closes "+(g.length===1&&g[0].count===1?"it":"them")+" cleanly before anything moves"
-        +(services?"; services start again on their own":"")+(apps?(services?" and apps":"; apps")+" can be reopened as usual":"")+".";
+    return "Open now: "+joined+". The restart closes "+(labels.length===1?"it":"them")+" cleanly.";
 }
 // Only the read-only helper assessment decides whether preparation is needed.
 function moveReview(result) {
     var name=shortPath(result.source),dest=display(result.destMount),stats=result.stats||{};
     var busy=inUseText(result.inUse);
-    var text=compact(stats.bytes||0)+" · "+(stats.files||0).toLocaleString()+" files checked.\n"
-        +name+" → "+dest+"\nKeeps its path. Apps use it as before.\n"
-        +"Moves on your next restart; every file is verified. The old copy is kept until you delete it.\n"
-        +(busy?busy+"\n":"")
-        +"Your password is asked once to schedule it. Restart now or later.";
-    if(result.needsPreparation===true)text+="\n\nThis also permanently prepares "+dest+" for moves. Only the "+dest+" folder itself becomes owned by the system. Everything inside it stays yours and keeps working. Read access isn't widened. Afterwards, new top-level folders in "+dest+" are made by moving a folder here (or with sudo). This ownership change is not undone by cancelling the move.";
-    return text;
+    var lines=[name+" → "+dest+" · "+compact(stats.bytes||0)+", "+(stats.files||0).toLocaleString()+" files",
+        "Moves at your next restart. Same path, every file checked.",
+        "The old copy stays until you delete it in Drives, so Undo works."];
+    if(busy)lines.push(busy);
+    if(result.needsPreparation===true)lines.push("First move to "+dest+": its top folder becomes system-owned for good. Your files stay yours.");
+    return lines.join("\n\n");
 }
 // What the move detail screen lists as proof (mock F).
 function moveChecks(m) {

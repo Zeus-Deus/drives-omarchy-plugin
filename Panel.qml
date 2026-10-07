@@ -656,7 +656,20 @@ BarWidget {
         owner: root
         focusTarget: catcher
         contentWidth: fittedContentWidth(Style.space(460))
-        contentHeight: fittedContentHeight(content.implicitHeight, Style.space(660))
+        // The review card is drawn over the panel; grow the panel while it is
+        // open so a long review never runs past the panel's edge.
+        contentHeight: fittedContentHeight(Math.max(content.implicitHeight, confirm.opened ? confirmMeasure.implicitHeight + Style.space(150) : 0), Style.space(660))
+
+        Text {
+            id: confirmMeasure
+            visible: false
+            text: confirm.message
+            width: Math.min(Style.space(460) - Style.space(32), Style.space(370)) - Style.space(40)
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            font.family: Style.font.family
+            font.pixelSize: Style.font.title
+        }
 
         PanelKeyCatcher {
             id: catcher
