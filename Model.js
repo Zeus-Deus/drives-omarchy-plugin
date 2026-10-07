@@ -22,7 +22,13 @@ function boundedArgv(argv) {
     var script = 'o=$1; shift; set -o pipefail; "$@" 2>/dev/null | { head -c "$o"; [ "$(head -c 1 | wc -c)" -eq 0 ] || exit 90; }';
     return ["/usr/bin/bash","-c",script,"drives-bound","2097152"].concat(argv);
 }
-function configuredDriveState(drive,disks) {
+// mounts (optional): the snapshot's mount rows. A drive whose mountpoint is
+// only an idle automount (x-systemd.automount, nothing opened it since boot)
+// is "Idle": ready, mounted on first use. Status never touches it to find out.
+function _idleAutomount(drive,disk,mounts) {
+    return disk.state==="unlocked" && (mounts||[]).some(function(m){return m.target===drive.mountpoint&&m.fstype==="autofs";});
+}
+function configuredDriveState(drive,disks,mounts) {
     if(drive.state!=="ready")return "Unfinished setup";
     if(!drive.byId || !drive.serial || !drive.mountpoint)return "Inspect identity";
     var matches=disks.filter(function(d){return d.byId===drive.byId && d.serial===drive.serial;});
@@ -31,22 +37,23 @@ function configuredDriveState(drive,disks) {
     var disk=matches[0];
     if(disk.system || disk.state==="unsupported" || disk.encrypted!==true)return "Inspect identity";
     if(disk.state==="locked")return "Locked";
-    var mounts=disk.mounts||[];
-    for(var i=0;i<mounts.length;i++)if(mounts[i].target===drive.mountpoint && mounts[i].fstype==="btrfs") {
-        var options=String(mounts[i].options||"").split(",");
+    var own=disk.mounts||[];
+    for(var i=0;i<own.length;i++)if(own[i].target===drive.mountpoint && own[i].fstype==="btrfs") {
+        var options=String(own[i].options||"").split(",");
         return options.indexOf("rw")>=0 && options.indexOf("ro")<0 ? "Mounted" : "Read-only";
     }
+    if(_idleAutomount(drive,disk,mounts))return "Idle";
     return "Not mounted";
 }
 // What the panel can do for a configured drive that is not fully available.
 // Moved folders on it count: a mounted drive whose binds are down still needs
 // reconnecting (e.g. it was unplugged and plugged back in).
-function driveFix(drive,disks,moves) {
-    var state=configuredDriveState(drive,disks);
+function driveFix(drive,disks,moves,mounts) {
+    var state=configuredDriveState(drive,disks,mounts);
     var down=(moves||[]).some(function(m){return m.destMount===drive.mountpoint&&["switched","rebooted","cleaning","cleaned"].indexOf(m.state)>=0&&!m.bound;});
     if(state==="Missing drive")return {action:"",hint:"Plug the drive back in. Folders moved onto it stay locked, so nothing is written to the OS disk."};
     if(state==="Locked"&&drive.keyfilePresent===false)return {action:"recover",hint:"This computer no longer has the drive's key (reinstall or new machine). Unlock it with the recovery passphrase."};
-    if(state==="Locked"||state==="Not mounted"||(state==="Mounted"&&down))return {action:"reconnect",hint:"The drive is connected but not in use. Reconnect it with its own key; no passphrase needed."};
+    if(state==="Locked"||state==="Not mounted"||((state==="Mounted"||state==="Idle")&&down))return {action:"reconnect",hint:"The drive is connected but not in use. Reconnect it with its own key; no passphrase needed."};
     return {action:"",hint:""};
 }
 // The ready Drives record for a present disk (exact by-id + serial), or null.
@@ -107,6 +114,7 @@ function moveActions(move,pending) {
     if(pending && pending.moveId===move.id && pending.thisSession===false)a=a.filter(function(x){return x!=="cancel_restart";});
     return a;
 }
+var SMART_INSTALL="omarchy pkg add smartmontools";
 // SMART verdict for a disk from the helper's cached health report.
 function health(disk,report) {
     var all=(report&&report.disks)||{};
@@ -114,7 +122,9 @@ function health(disk,report) {
     if(!h)return {state:"unknown",label:"Health: checking…",reason:""};
     var label={passed:"Health: OK",warning:"Health: warning",failing:"Health: FAILING",unavailable:"Health: not available"}[h.state]||"Health: unknown";
     if(h.temperature)label+=" · "+h.temperature+"°C";
-    return {state:h.state,label:label,reason:display(h.reason)};
+    // smartmontools is not part of a stock Omarchy install; offer the exact command.
+    var missing=h.reason==="smartmontools is not installed";
+    return {state:h.state,label:missing?"Health: needs smartmontools":label,reason:missing?"Health checks need smartmontools. Install it with: "+SMART_INSTALL:display(h.reason),install:missing};
 }
 // Read/write rates (bytes/s) per disk name from two status snapshots.
 function ioRates(prev,cur) {
@@ -148,7 +158,7 @@ function shortPath(p){return display(String(p||"").replace(/^\/home\/[^\/]+(?=\/
 var FINISHED=["switched","rebooted","cleaning","cleaned"];
 function _usage(disk,target){var u=(disk&&disk.usage)||[];for(var i=0;i<u.length;i++)if(u[i].target===target)return u[i];return u.length?u[0]:null;}
 function _drivePill(state,drive) {
-    if(state==="Mounted")return [drive.autoUnlock===false?"asks every time":"unlocks with OS","ok"];
+    if(state==="Mounted"||state==="Idle")return [drive.autoUnlock===false?"asks every time":"unlocks with OS","ok"];
     if(state==="Missing drive")return ["not connected","bad"];
     if(state==="Locked")return ["locked","bad"];
     if(state==="Not mounted")return ["not in use","bad"];
@@ -304,15 +314,15 @@ function dataDrives(snapshot) {
     drives.forEach(function(d){
         var disk=null;disks.forEach(function(x){if(x.byId===d.byId&&x.serial===d.serial&&d.serial)disk=x;});
         if(disk)used[disk.id]=true;
-        var state=configuredDriveState(d,disks),pill=_drivePill(state,d),u=_usage(disk,d.mountpoint);
+        var state=configuredDriveState(d,disks,snapshot.mounts),pill=_drivePill(state,d),u=_usage(disk,d.mountpoint);
         var folders=movedFolders(d.mountpoint,moves).concat(manualBinds(snapshot,disk));
         var segs=[];if(u&&u.total>0)folders.forEach(function(f,i){segs.push({color:i%4,fraction:Math.min(1,f.bytes/u.total)});});
         var other=u&&u.total>0?Math.max(0,u.used/u.total-segs.reduce(function(a,s){return a+s.fraction;},0)):0;
         var h=disk?health(disk,snapshot.health):{state:"unknown",label:"",reason:""};
-        var fix=driveFix(d,disks,moves);
+        var fix=driveFix(d,disks,moves,snapshot.mounts);
         out.push({key:"drive:"+d.id,drive:d,disk:disk,title:disk?display(disk.model):"Drive “"+display(d.name)+"”",
             size:disk?compact(disk.size):"",pill:pill[0],tone:pill[1],state:state,usage:u,segments:segs,other:other,
-            sub:u?display(d.mountpoint)+" · "+compact(u.used)+" used · "+compact(u.free)+" free · zstd":display(d.mountpoint)+" · "+(fix.hint||state),
+            sub:u?display(d.mountpoint)+" · "+compact(u.used)+" used · "+compact(u.free)+" free · zstd":display(d.mountpoint)+" · "+(fix.hint||(state==="Idle"?"ready · mounts when first used":state)),
             health:h,fix:fix,folders:folders,problem:pill[1]==="bad"||fix.action!==""||h.state==="failing"||h.state==="warning"||folders.some(function(f){return !f.bound;})});
     });
     disks.forEach(function(x){
@@ -358,8 +368,13 @@ function suggestMount(snapshot) {
 }
 // Mounted Drives destinations a folder can move to.
 function moveTargets(snapshot) {
-    return dataDrives(snapshot).filter(function(r){return r.state==="Mounted"&&(r.drive?r.drive.autoUnlock!==false:targetIssue(r)==="");})
-        .map(function(r){return {mountpoint:r.drive?r.drive.mountpoint:r.usage.target,title:r.title,free:r.usage?r.usage.free:0};});
+    // An idle automounted Drives drive is a valid target: the helper starts its
+    // mount when the move is checked; free space shows once it is mounted.
+    return dataDrives(snapshot).filter(function(r){return (r.state==="Mounted"||(r.state==="Idle"&&!!r.drive))&&(r.drive?r.drive.autoUnlock!==false:targetIssue(r)==="");})
+        .map(function(r){return {mountpoint:r.drive?r.drive.mountpoint:r.usage.target,title:r.title,free:r.usage?r.usage.free:null};});
+}
+function targetSub(t) {
+    return display(t.mountpoint)+" · "+(typeof t.free==="number"?compact(t.free)+" free":"mounts when first used");
 }
 // Why folders can't be moved onto a drive set up by hand, or "". The helper
 // checks the same things again (helper/moves.py preflight).
@@ -379,7 +394,7 @@ function blockedTargets(snapshot) {
 }
 // Rows for the MOVED FOLDERS section, colour-matched to their drive's meter.
 function folderRows(snapshot) {
-    var moves=visibleMoves(snapshot.moves||[]),pending=snapshot.restartPending,idx={},width=_folderWidth(snapshot);
+    var moves=visibleMoves(snapshot.moves||[]).filter(function(m){return m.state!=="returned";}),pending=snapshot.restartPending,idx={},width=_folderWidth(snapshot);
     dataDrives(snapshot).forEach(function(r){(r.folders||[]).forEach(function(f,i){idx[f.source+"\u0000"+(r.drive&&r.drive.mountpoint)]=i%4;});});
     return moves.map(function(m){
         var stage=moveStage(m,pending),c=idx[m.source+"\u0000"+m.destMount];
@@ -450,13 +465,51 @@ function moveFacts(m,snapshot) {
     var free=null;dataDrives(snapshot||{}).forEach(function(r){if(r.drive&&r.drive.mountpoint===m.destMount&&r.usage)free=r.usage.free;});
     return compact(m.stats.bytes||0)+" · "+(m.stats.files||0).toLocaleString()+" files"+(free===null?"":" · "+compact(free)+" free on "+display(m.destMount));
 }
+// Who is using a folder right now, grouped the way a person thinks of it:
+// one line per app or background service, never a raw pid list.
+// [{label, kind:"service"|"app", names:[process names], count}]
+function _unitApp(unit) {
+    var u=String(unit||"");
+    if(/\.service$/.test(u))return {key:u,label:u.replace(/\.service$/,"").replace(/^app-/,"").replace(/@.*$/,""),kind:"service"};
+    var m=u.match(/^app-(.+?)(?:-[0-9a-f]{6,}|-[0-9]+)?\.scope$/);
+    if(m){var id=m[1].replace(/^Hyprland-/,"").replace(/^uwsm-/,"");var parts=id.split(".");return {key:u,label:parts[parts.length-1]||id,kind:"app"};}
+    return null;
+}
+function inUseGroups(list) {
+    var groups=[],by={};
+    (list||[]).forEach(function(p){
+        if(!p||typeof p.pid!=="number")return;
+        var app=_unitApp(p.unit)||{key:"proc:"+display(p.name),label:display(p.name)||"a program",kind:"app"};
+        var g=by[app.key];
+        if(!g){g=by[app.key]={label:display(app.label),kind:app.kind,names:[],count:0};groups.push(g);}
+        g.count++;var n=display(p.name);if(n&&g.names.indexOf(n)<0&&g.names.length<3&&n!==g.label)g.names.push(n);
+    });
+    return groups;
+}
+// One readable sentence for the review: "In use by Chromium (vite, esbuild) and
+// the hermes-serve background service."
+function inUseText(list) {
+    var g=inUseGroups(list);if(!g.length)return "";
+    var parts=g.slice(0,4).map(function(x){
+        // A service's own name is what the user knows; its process names are noise.
+        if(x.kind==="service")return "the "+x.label+" background service";
+        return x.label+(x.names.length?" ("+x.names.join(", ")+")":"");
+    });
+    if(g.length>4)parts.push(String(g.length-4)+" more");
+    var joined=parts.length===1?parts[0]:parts.slice(0,-1).join(", ")+" and "+parts[parts.length-1];
+    var services=g.some(function(x){return x.kind==="service";}),apps=g.some(function(x){return x.kind!=="service";});
+    return "In use by "+joined+". The restart closes "+(g.length===1&&g[0].count===1?"it":"them")+" cleanly before anything moves"
+        +(services?"; services start again on their own":"")+(apps?(services?" and apps":"; apps")+" can be reopened as usual":"")+".";
+}
 // Only the read-only helper assessment decides whether preparation is needed.
 function moveReview(result) {
     var name=shortPath(result.source),dest=display(result.destMount),stats=result.stats||{};
+    var busy=inUseText(result.inUse);
     var text=compact(stats.bytes||0)+" · "+(stats.files||0).toLocaleString()+" files checked.\n"
         +name+" → "+dest+"\nKeeps its path. Apps use it as before.\n"
         +"Moves on your next restart; every file is verified. The old copy is kept until you delete it.\n"
-        +"Authorize once to schedule. Restart now is optional.";
+        +(busy?busy+"\n":"")
+        +"Your password is asked once to schedule it. Restart now or later.";
     if(result.needsPreparation===true)text+="\n\nThis also permanently prepares "+dest+" for moves. Only the "+dest+" folder itself becomes owned by the system. Everything inside it stays yours and keeps working. Read access isn't widened. Afterwards, new top-level folders in "+dest+" are made by moving a folder here (or with sudo). This ownership change is not undone by cancelling the move.";
     return text;
 }
@@ -470,6 +523,12 @@ function moveChecks(m) {
         {ok:m.state==="rebooted"||m.state==="cleaned"||m.state==="cleaning",pending:m.state==="switched",text:m.state==="switched"?"Restart once to confirm it comes back":"Still mounted after a restart"}
     ];
 }
+// Live line while the helper checks a folder: "Checking ~/Videos · 41,200 files · 0:04".
+function assessProgress(source,job,elapsedMs) {
+    var t=Math.max(0,Math.floor((elapsedMs||0)/1000)),clock=Math.floor(t/60)+":"+(t%60<10?"0":"")+(t%60);
+    var n=job&&job.progress&&typeof job.progress.entries==="number"?job.progress.entries:0;
+    return "Checking "+shortPath(source)+(n>0?" · "+n.toLocaleString()+" items":"")+" · "+clock;
+}
 // Human words for a helper job.
 function jobText(job) {
     if(!job)return {title:"Waiting for the helper…",state:"running"};
@@ -477,11 +536,19 @@ function jobText(job) {
         AssessMove:"Checking folder safety",ScheduleMove:"Scheduling the move",StartMove:"Planning the move",ResumeMove:"Scheduling the move",RollbackMove:"Scheduling the undo",MoveBack:"Scheduling move back",CancelRestart:"Withdrawing the restart request",
         CancelMove:"Cancelling the move",RestartMove:"Starting over",DeleteOldCopy:"Deleting the old copy",ExportHeaderBackup:"Exporting the header backup"};
     var t=names[job.method]||display(job.method);
-    if(job.method==="ScheduleMove" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="continue")return {title:"Moves on next restart",state:"done",error:""};
-    if(job.method==="MoveBack" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="return")return {title:"Moves back on next restart",state:"done",error:""};
+    if(job.method==="ScheduleMove" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="continue")return {title:"Moves on next restart",state:"done",scheduled:true,error:""};
+    if(job.method==="MoveBack" && job.state==="done" && job.result && job.result.state==="restart-required" && job.result.action==="return")return {title:"Moves back on next restart",state:"done",scheduled:true,error:""};
+    if(job.state==="done" && job.result && job.result.state==="restart-required")return {title:{RollbackMove:"Undo on next restart",ResumeMove:"Moves on next restart"}[job.method]||"Scheduled for next restart",state:"done",scheduled:true,error:""};
     if(job.method==="AssessMove" && job.state==="done")return {title:"Safety checked",state:"done",error:""};
     if(job.state==="done")t=t.replace(/^(\w+)ing/,function(m,w){return {Setting:"Set",Finishing:"Finished",Unlocking:"Unlocked",Reconnecting:"Reconnected",Planning:"Planned",Scheduling:"Scheduled",Withdrawing:"Withdrew",Cancelling:"Cancelled",Starting:"Started",Deleting:"Deleted",Exporting:"Exported"}[m]+"";});
     return {title:t,state:job.state,error:display(job.error)};
+}
+// Hero subtitle for a finished job: a restart-time step is scheduled, not done.
+function jobMeta(job) {
+    var j=jobText(job);
+    if(j.state==="running")return "working · you can close this panel";
+    if(j.state==="failed")return jobFailureHint(job);
+    return j.scheduled?"scheduled · happens on restart":"done";
 }
 function jobFailureHint(job) {
     if(job && job.method==="AssessMove")return "assessment refused · nothing moved";
@@ -514,7 +581,7 @@ function warning(snapshot) {
     var ds=snapshot.drives||[],ms=snapshot.moves||[];
     var disks=snapshot.disks||[];
     for(var k=0;k<disks.length;k++){var h=health(disks[k],snapshot.health).state;if(h==="failing"||h==="warning")return true;}
-    for(var i=0;i<ds.length;i++)if(configuredDriveState(ds[i],snapshot.disks||[])!=="Mounted")return true;
+    for(var i=0;i<ds.length;i++){var st=configuredDriveState(ds[i],snapshot.disks||[],snapshot.mounts);if(st!=="Mounted"&&st!=="Idle")return true;}
     for(var j=0;j<ms.length;j++){
         var stage=moveStage(ms[j],snapshot.restartPending);
         if(["attention","restore-on-restart","inspect","interrupted"].indexOf(stage)>=0)return true;

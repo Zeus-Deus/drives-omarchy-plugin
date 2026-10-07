@@ -40,3 +40,23 @@ def test_install_runs_the_upgrade_and_recovery_unlock_hides_the_volume():
     assert 'helper.udevhide --all' in (ROOT/'helper/install.sh').read_text()
     assert 'hide_from_automount' in (ROOT/'helper/provisioning.py').read_text()
     assert 'hide_from_automount' in (ROOT/'helper/driveconfig.py').read_text()
+
+
+def test_rule_also_hides_the_opened_volume():
+    text=udevhide.rule_text('data',UUID)
+    assert 'ENV{DM_UUID}=="CRYPT-LUKS?-'+UUID.replace('-','')+'-*"' in text
+    assert text.count('UDISKS_IGNORE')==2
+
+
+def test_setup_rule_hides_by_serial_and_is_removed_by_the_final_rule(tmp_path,monkeypatch):
+    udevhide.apply_setup('data','TESTNEW00002',tmp_path)
+    setup=tmp_path/'90-drives-data-setup.rules'
+    assert 'ENV{ID_SERIAL_SHORT}=="TESTNEW00002", ENV{UDISKS_IGNORE}="1"' in setup.read_text()
+    monkeypatch.setattr(udevhide,'RULES',tmp_path);monkeypatch.setattr(udevhide,'run',lambda *a,**k:b'')
+    udevhide.apply('data',UUID)
+    assert not setup.exists() and (tmp_path/'90-drives-data.rules').exists()
+
+
+@pytest.mark.parametrize('serial',['','abc','x"y',"a\nRUN+=\"/bin/sh\"",'a b c d'])
+def test_setup_rule_refuses_untrusted_serials(serial):
+    with pytest.raises(Failure):udevhide.setup_text('data',serial)

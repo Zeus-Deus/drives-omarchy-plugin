@@ -151,14 +151,31 @@ def open_users(path,proc_root='/proc'):
                     if len(fields)==6 and (inside(fields[5]) or inside(fields[5].replace('\\012','\n'))):used=True;break
             if used:
                 name=read_regular(proc/'comm',4096).decode('utf-8','replace').strip()[:80]
-                found.append({'pid':int(proc.name),'name':name})
+                entry={'pid':int(proc.name),'name':name}
+                unit=process_unit(proc)
+                if unit:entry['unit']=unit
+                found.append(entry)
         except PermissionError as exc:
             raise Failure('cannot inspect active use; root helper needs proc visibility') from exc
         except (FileNotFoundError,ProcessLookupError):continue
-    return found[:24]
+    return found[:48]
 
-def tree_stats(path,uid=None):
-    count=0;size=0;directories=0;h=hashlib.sha256();groups=set()
+def process_unit(proc):
+    """The systemd service or scope a process runs in, so the panel can say
+    'background service' or name the app. Metadata only; '' when unknown."""
+    try:lines=read_regular(proc/'cgroup',16384).decode('utf-8','replace').splitlines()
+    except (OSError,Failure):return ''
+    for line in lines:
+        if line.startswith('0::'):
+            parts=[p for p in line[3:].split('/') if p.endswith(('.service','.scope'))]
+            return parts[-1][:120] if parts else ''
+    return ''
+
+def _shown(path):
+    return os.fsdecode(path).encode('utf-8','replace').decode('utf-8')[:160]
+
+def tree_stats(path,uid=None,progress=None):
+    count=0;size=0;directories=0;h=hashlib.sha256();groups=set();seen=0
     if uid is not None:
         user=pwd.getpwuid(uid);groups=set(os.getgrouplist(user.pw_name,user.pw_gid))
     def unreadable(exc):raise Failure('unreadable subtree; refusing a silent skip') from exc
@@ -180,20 +197,51 @@ def tree_stats(path,uid=None):
             # rsync -a preserves the link itself, never its referent. Relative
             # and absolute external links keep their meaning through the
             # familiar bind path; rejecting them would block ordinary profiles.
-            if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Failure('special file refused (socket, FIFO or device)')
+            # A socket is a dead rendezvous name once its owner has exited (and
+            # nothing runs in the maintenance boot); rsync -a recreates it.
+            # FIFOs and device nodes are still refused.
+            if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or stat.S_ISSOCK(s.st_mode)):
+                raise Failure('special file refused (FIFO or device): '+_shown(p))
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
-            if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0])[1]+=1
+            if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:
+                links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0,p])[1]+=1
             h.update(len(rel).to_bytes(4,'big'));h.update(rel);h.update(str((s.st_mode,s.st_uid,s.st_gid,s.st_size)).encode())
+            seen+=1
+            if progress and seen%5000==0:progress(seen)
+    if progress:progress(seen)
     # A hardlink to a file outside the folder would silently become two
     # separate files after the move; refuse instead of splitting it.
-    if any(seen<total for total,seen in links.values()):raise Failure('a file here is also linked from outside this folder (hardlink); moving it would split the two names')
+    split=[name for total,inside,name in links.values() if inside<total]
+    if split:raise Failure(str(len(split))+' file(s) here also have a name outside this folder (hard links), e.g. '+_shown(split[0])+'. Moving would split each into two separate copies')
     return {'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
 
 class MoveManager:
-    def __init__(self,common,uid=None,isolated=False):
+    def __init__(self,common,uid=None,isolated=False,progress=None):
         # isolated: running inside drives-helper.service, whose namespace keeps
         # drives read-only; destination writes then go through helper.destination.
-        self.c=common;self.uid=uid;self.isolated=isolated
+        self.c=common;self.uid=uid;self.isolated=isolated;self.progress=progress
+    def wake(self,mountpoint):
+        """Start a drive's own mount unit when only its idle automount is there.
+
+        After boot an x-systemd.automount drive stays an autofs placeholder
+        until something opens it, which made assessment and resume report the
+        drive as missing. Only explicit user operations call this, never
+        Status/inspect, and only for a mountpoint this machine already
+        configured (a Drives record or an /etc/fstab line): starting that unit
+        is exactly what the first access would do."""
+        if not isinstance(mountpoint,str) or not mountpoint.startswith('/'):return
+        rows=[r for r in mount_rows() if r['target']==mountpoint]
+        if not rows or any(r['fstype']!='autofs' for r in rows):return
+        known=any(d.get('state')=='ready' and d.get('mountpoint')==mountpoint for d in self.c.records('drives'))
+        if not known:
+            try:fstab=read_regular('/etc/fstab',65536).decode('utf-8','replace').splitlines()
+            except (OSError,Failure):fstab=[]
+            known=any(len(f)>=2 and not f[0].startswith('#') and f[1]==escape_fstab(mountpoint) for f in (line.split() for line in fstab))
+        if not known:return
+        safe_path(mountpoint)
+        unit=run(['systemd-escape','--path','--suffix=mount',mountpoint]).decode().strip()
+        try:run(['systemctl','start',unit],timeout=90)
+        except Failure:pass  # the admission below reports the drive state itself
     def destination_op(self,j,*args):
         from helper import destination
         if not self.isolated:return destination.main(list(args))
@@ -235,8 +283,11 @@ class MoveManager:
         parent_id=identity(str(source.parent));mount_id=identity(destMount)
         if source_id[1]==256 and source_id[2] is not None:raise Failure('source subvolume root cannot be quarantined; choose an ordinary folder')
         if any(r['target']==src or r['target'].startswith(src+'/') for r in rows):raise Failure('nested or existing mount blocks the move')
+        # Active use is reported, not refused: the move runs in the maintenance
+        # boot, after a normal shutdown has stopped every app and service, and
+        # that boot independently refuses any non-root process. The list lets
+        # the review say what the restart will close.
         owners=open_users(src)
-        if owners:raise Failure('Close these apps or leave this folder, then retry; active use (open files, cwd, mmap or executable): '+', '.join(x['name']+' (pid '+str(x['pid'])+')' for x in owners))
         topology=probe(destMount,block,rows,resolve=False)
         if not topology['supported'] or not topology.get('encrypted') or topology['mount']['target']!=destMount:raise Failure('destination must be a mounted single encrypted disk')
         if 'ro' in topology['mount'].get('options','').split(','):raise Failure('destination is read-only')
@@ -249,11 +300,12 @@ class MoveManager:
             if not allow_preparation:raise Failure('destination mount must be root-owned and not group/world writable; explicit preparation consent is required')
             if t.st_uid not in (0,uid):raise Failure('destination mount is not owned by the caller or root')
         if destMount==src or destMount.startswith(src+'/') or src.startswith(destMount+'/'):raise Failure('source and destination overlap')
-        stats=tree_stats(src,uid);v=os.statvfs(target)
+        stats=tree_stats(src,uid,self.progress);v=os.statvfs(target)
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
         if identity(src)!=source_id or identity(str(source.parent))!=parent_id or identity(destMount)!=mount_id:raise Failure('source or destination directory changed during assessment')
         identities={'sourceIdentity':source_id,'parentIdentity':parent_id,'mountIdentity':mount_id,
             'sourceUUID':origin['chain'][-1]['uuid'],'sourceMount':origin['mount']['target']}
+        self.in_use=owners
         return stats,topology,uid,needs,identities
     def preflight(self,src,destMount):
         stats,topology,uid,_,_=self._preflight(src,destMount)
@@ -281,10 +333,11 @@ class MoveManager:
         if identity(src)!=identities['sourceIdentity'] or identity(str(pathlib.Path(src).parent))!=identities['parentIdentity'] or identity(destMount)!=identities['mountIdentity']:raise Failure('source or destination directory changed during assessment')
         self.controls();self.conflicts(src,exclude)
         return {'stats':stats,'topology':topology,'uid':uid,'needsPreparation':needs,
-            'destMapper':mapper,**identities}
+            'destMapper':mapper,'inUse':getattr(self,'in_use',[]),**identities}
     def assess(self,src,destMount):
+        self.wake(destMount)
         facts=self.admit(src,destMount,allow_preparation=True)
-        return {'ok':True,'source':src,'destMount':destMount,'needsPreparation':facts['needsPreparation'],'stats':facts['stats']}
+        return {'ok':True,'source':src,'destMount':destMount,'needsPreparation':facts['needsPreparation'],'stats':facts['stats'],'inUse':facts['inUse']}
     def offline_layout(self,src,topology):
         """Facts the maintenance boot needs to mount both sides by itself."""
         from helper.offline import crypttab_key
@@ -323,6 +376,7 @@ class MoveManager:
             raise Failure('destination topology changed during scheduling; inspect the plan')
     def schedule_move(self,src,destMount,prepareDestination):
         if type(prepareDestination) is not bool:raise Failure('preparation consent must be a boolean')
+        self.wake(destMount)
         facts=self.admit(src,destMount,allow_preparation=True)
         if facts['needsPreparation'] and not prepareDestination:raise Failure('explicit consent is required for permanent destination mount-root preparation')
         j=self.new_plan(src,destMount,facts)
@@ -346,7 +400,7 @@ class MoveManager:
             self.c.journal('moves',j['id'],j)
             arm_attempted=True
             result=self.request(j['id'],'continue')
-            result['preparation']=j['preparation']
+            result['preparation']=j['preparation'];result['inUse']=current['inUse']
             return result
         except BaseException as exc:
             prep=j['preparation']
@@ -377,6 +431,7 @@ class MoveManager:
     def request(self,id,action):
         if action not in ('continue','rollback','return'):raise Failure('invalid maintenance action')
         j=self.c.read('moves',id)
+        self.wake(j.get('destMount'))
         if j.get('maintenanceProtocol')!=2:raise Failure('this older move needs administrator inspection; both copies are kept')
         if action=='return':
             self.controls();self.return_admission(j)
@@ -404,7 +459,8 @@ class MoveManager:
         elif j['state']=='rolling-back':pass # interrupted Undo: the worker finishes restoring
         else:
             if j['state']!='switched' or not j.get('verified') or not self.bound(j):raise Failure('only an active, verified move can be undone')
-            if open_users(j['source']):raise Failure('close apps using this folder first')
+            # Undo also runs in the maintenance boot, after shutdown closed every
+            # user of the folder; in-session users are not a reason to refuse.
         self.latch('arm',id,action)
         j['error']='';j.pop('needsAttention',None);self.c.journal('moves',id,j)
         return {'ok':True,'id':id,'state':'restart-required','action':action}
@@ -582,11 +638,14 @@ class MoveManager:
 
         self.return_config(j,allow_removed=j['state']=='return-finishing')
         if not full:return None
-        for path in (j['source'],j['dest']):
-            users=open_users(path)
-            if users:
-                names=', '.join(p['name']+' (pid '+str(p['pid'])+')' for p in users[:16])
-                raise Failure('close these apps or leave this folder or SSD copy, then retry Move back: '+names)
+        # In the normal session the shutdown before the maintenance boot closes
+        # these users; inside the maintenance boot nothing may hold them.
+        if offline:
+            for path in (j['source'],j['dest']):
+                users=open_users(path)
+                if users:
+                    names=', '.join(p['name']+' (pid '+str(p['pid'])+')' for p in users[:16])
+                    raise Failure('unexpected process holds the folder or SSD copy during maintenance: '+names)
         stats=tree_stats(j['dest'],j['uid'])
         if j['state'] not in RETURN_STATES:
             v=os.statvfs(str(pathlib.Path(j['source']).parent))
@@ -594,6 +653,7 @@ class MoveManager:
         return stats
     def delete_old(self,id):
         j=self.c.read('moves',id)
+        self.wake(j.get('destMount'))
         if not j.get('verified') or j.get('boot_id')==self.c.boot_id():raise Failure('cleanup requires saved verification and a successful reboot')
         if j.get('maintenanceProtocol')!=2:raise Failure('legacy live verification cannot authorize cleanup; retain the old copy for maintenance inspection')
         self.destination(j)
@@ -649,6 +709,7 @@ class MoveManager:
             raise Failure('missing destination identity; only safe protocol-2 cancellation is available')
     def discard_destination(self,id,restart=False):
         j=self.c.read('moves',id)
+        self.wake(j.get('destMount'))
         if restart:self.copy_layout(j)
         self.discard_admission(j,allow_incomplete=not restart)
         if not self.recorded_destination(j):

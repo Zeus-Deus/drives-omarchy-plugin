@@ -66,19 +66,39 @@ udev rules through `helper/udevhide.py`.
 Omarchy autostarts `udiskie`, which would pop a generic "Enter password for
 /dev/sdX1" dialog for a locked Drives volume and open it under the wrong name.
 Every Drives volume gets `/etc/udev/rules.d/90-drives-<name>.rules` setting
-`UDISKS_IGNORE=1` (on setup, on recovery unlock, and for existing drives when
-the helper is reinstalled).
+`UDISKS_IGNORE=1` on the LUKS partition **and** on its opened dm-crypt volume
+(matched by `DM_UUID`); without the second line udiskie tries to mount
+`/dev/mapper/<name>` itself and polkit asks for a password. During setup, a
+temporary `90-drives-<name>-setup.rules` hides the whole disk by serial before
+the first format, and the per-volume rule is written as soon as the LUKS UUID
+exists, before the volume is closed and reopened. The final rule replaces the
+setup rule. Rules are also applied on recovery unlock and, for existing
+drives, when the helper is reinstalled.
 
 ## Moving a folder (protocol 2)
 
 1. **Assess (normal session).** Hidden/profile/credential/database names do
    not decide admission. Require a caller-owned ordinary directory strictly
-   inside the actual caller's home. Refuse unreadable subtrees, actual active
-   use (fd/cwd/mmap/executable; list processes, never kill them), special
-   files, existing/nested mounts, source subvolume roots, external hardlinks,
-   a destination other than a non-system encrypted Btrfs root mount with
-   keyfile unlock, or less than 1.2× source apparent size free. Symlinks inside
-   the tree are copied as links; source/ancestor symlinks are refused.
+   inside the actual caller's home. Refuse unreadable subtrees, FIFOs and
+   device nodes (naming the path), existing/nested mounts, source subvolume
+   roots, external hardlinks (naming an example), a destination other than a
+   non-system encrypted Btrfs root mount with keyfile unlock, or less than 1.2×
+   source apparent size free. Symlinks inside the tree are copied as links;
+   source/ancestor symlinks are refused. Leftover socket files are inert names
+   once their owner stopped and are recreated by `rsync -a`.
+   Active use (fd/cwd/mmap/executable) is **reported, not refused**: the result
+   carries `inUse` (pid, name, systemd unit) and the review names the apps and
+   background services. Nothing is killed. The normal shutdown before the
+   maintenance boot stops them, and the maintenance audit independently refuses
+   any non-root process, session or pending job, so exclusion still comes from
+   the boot, not from an in-session snapshot. The same applies to Undo and
+   Move back requests; inside maintenance a holder is still a refusal.
+   The panel starts this check as soon as folder and drive are known and shows
+   live progress (`job.progress.entries`, elapsed time). Assessment, scheduling
+   and other explicit requests first start the drive's own mount unit when its
+   mountpoint is only an idle `x-systemd.automount` (configured Drives record or
+   fstab line only). Status never does this; it shows such a drive as ready,
+   "mounts when first used".
 2. **Review and schedule.** Assessment returns source, destination, stats and
    `needsPreparation`. Cancel-default confirmation explicitly includes any
    permanent root-ownership change to the destination's top folder. A single

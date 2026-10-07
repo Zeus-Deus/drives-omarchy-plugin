@@ -236,7 +236,7 @@ test('planned rows open their existing move, aggregate rows explain why, all rem
 });
 test('actual move UI has assessment progress/retry, no name blacklist claim or separate preparation buttons',()=>{
     const source=fs.readFileSync(path.join(repo,'Panel.qml'),'utf8');
-    assert.match(source,/Safety assessment/);assert.match(source,/Retry assessment/);
+    assert.match(source,/Safety check/);assert.match(source,/Check again/);
     assert.match(source,/assessment\.state === "running"/);
     assert.doesNotMatch(source,/Open files, profiles, keyrings, databases/);
     assert.doesNotMatch(source,/selectable: r\.movable === true|opacity: r\.movable \? 1 : 0\.7/);
@@ -306,4 +306,85 @@ test('Enter on the actual Cancel-default kit dialog creates no scheduling reques
     dialog.handleKey({key:1});assert.equal(c.confirm.opened,false);assert.equal(c.requests.length,1);
     c.reviewMove();assert.equal(c.confirm.selectedIndex,0,'reopened review defaults to Cancel again');
     dialog.root.selectedIndex=1;dialog.handleKey({key:1});assert.equal(c.requests.length,2);assert.equal(c.requests[1].op,'schedule_move');
+});
+
+// ---- seamless UX: start on selection, in-use is a heads-up, live progress ----
+test('choosing a drive starts the safety check at once; no hidden second button',()=>{
+    const c=panel();c.targets=[{mountpoint:'/data',title:'A'},{mountpoint:'/data2',title:'B'}];
+    c.folderField.text='~/Videos';c.moveTarget='';c.view='move';
+    c.chooseTarget('/data2');
+    assert.equal(c.requests.length,1);assert.deepEqual(plain(c.requests[0]),{op:'assess_move',src:'/home/u/Videos',destMount:'/data2'});
+    assert.equal(c.assessment.state,'running');assert.equal(typeof c.assessment.started,'number');
+    c.chooseTarget('/data2');assert.equal(c.requests.length,1,'a running check is not restarted');
+});
+test('opening the move screen with folder and drive known starts checking immediately',()=>{
+    const c=panel();c.openMoveFolder('/home/u/Videos','/data');
+    assert.equal(c.folderField.text,'~/Videos','shown in the familiar ~ form');
+    assert.equal(c.moveSource,'/home/u/Videos','sent byte-exact');
+    assert.equal(c.requests.length,1);assert.equal(c.requests[0].op,'assess_move');
+});
+test('half-typed or empty folders never start a check or raise an error',()=>{
+    for(const t of ['','/etc','~/../x','Videos']){const c=panel();c.folderField.text=t;c.view='move';c.autoReview();assert.equal(c.requests.length,0,t);assert.equal(c.service.error,'',t);}
+});
+test('tilde display keeps exotic paths byte-exact',()=>{
+    for(const src of ['/home/u/F\n\u202e  weird','/home/u/Folder ','/home/u/~odd','/home/other/x']){
+        const c=panel();c.openMoveFolder(src,'/data');
+        if(c.requests.length)assert.equal(c.requests[0].src,src);
+        assert.equal(c.moveSource,src);
+    }
+});
+test('apps using the folder are named in the review instead of refusing',()=>{
+    const m=model();
+    const inUse=[{pid:1,name:'python3',unit:'hermes-serve.service'},{pid:2,name:'npm exec vite',unit:'app-org.chromium.Chromium-403278.scope'},
+        {pid:3,name:'node-MainThread',unit:'app-org.chromium.Chromium-403278.scope'},{pid:4,name:'esbuild',unit:'app-org.chromium.Chromium-403278.scope'},{pid:5,name:'hermes'}];
+    const g=m.inUseGroups(inUse);
+    assert.equal(g.length,3);assert.equal(g[0].label,'hermes-serve');assert.equal(g[0].kind,'service');
+    assert.equal(g[1].label,'Chromium');assert.equal(g[1].count,3);
+    const text=m.inUseText(inUse);
+    assert.match(text,/the hermes-serve background service/);assert.match(text,/Chromium \(npm exec vite, node-MainThread, esbuild\)/);
+    assert.match(text,/restart closes them cleanly/);assert.match(text,/services start again on their own/);
+    assert.doesNotMatch(text,/pid|cwd|mmap/);
+    const review=m.moveReview({source:'/home/u/.hermes',destMount:'/data',stats:{bytes:1,files:2},inUse});
+    assert.match(review,/In use by/);assert.match(review,/password is asked once/);assert.doesNotMatch(review,/Restart now is optional/);
+    assert.doesNotMatch(text,/hermes-serve background service \(/,'no raw process names after a service');
+    assert.equal(m.inUseText([]),'');assert.doesNotMatch(m.moveReview({source:'/home/u/V',destMount:'/data',stats:{}}),/In use/);
+});
+test('in-use names are sanitized and the list is bounded',()=>{
+    const m=model();const many=[];for(let i=0;i<20;i++)many.push({pid:i,name:'x\u202e'+i+'\nline'});
+    const t=m.inUseText(many);assert.doesNotMatch(t,/[\u202e\n]/);assert.match(t,/16 more/);
+});
+test('assessment progress line shows items checked and elapsed time',()=>{
+    const m=model();
+    assert.equal(m.assessProgress('/home/u/.hermes',null,4200),'Checking ~/.hermes · 0:04');
+    assert.equal(m.assessProgress('/home/u/.hermes',{progress:{entries:41200}},65000),'Checking ~/.hermes · '+(41200).toLocaleString()+' items · 1:05');
+});
+test('a scheduled restart-time step is never called done',()=>{
+    const m=model();
+    for(const [method,action] of [['ScheduleMove','continue'],['RollbackMove','rollback'],['MoveBack','return'],['ResumeMove','continue']]){
+        const job={method,state:'done',result:{ok:true,state:'restart-required',action}};
+        assert.equal(m.jobText(job).scheduled,true,method);assert.equal(m.jobMeta(job),'scheduled · happens on restart');
+    }
+    assert.equal(m.jobMeta({method:'DeleteOldCopy',state:'done',result:{ok:true,state:'cleaned'}}),'done');
+    const source=fs.readFileSync(path.join(repo,'Panel.qml'),'utf8');
+    assert.match(source,/Model\.jobMeta\(watchedJob\)/);assert.match(source,/Nothing has moved yet/);
+    assert.doesNotMatch(source,/hidden folders and dormant profiles are not refused just for their names/);
+});
+test('an idle automounted drive is a move target, not "not in use"',()=>{
+    const m=model();
+    const drive={id:'a'.repeat(32),state:'ready',byId:'/dev/disk/by-id/X',serial:'S1',mountpoint:'/data',name:'bulk',autoUnlock:true};
+    const disk={id:'X',byId:'/dev/disk/by-id/X',serial:'S1',encrypted:true,state:'unlocked',mounts:[],usage:[]};
+    const snap={drives:[drive],disks:[disk],moves:[],mounts:[{target:'/data',fstype:'autofs',source:'systemd-1'}]};
+    assert.equal(m.configuredDriveState(drive,[disk],snap.mounts),'Idle');
+    const row=m.dataDrives(snap)[0];assert.equal(row.pill,'unlocks with OS');assert.equal(row.fix.action,'');assert.match(row.sub,/mounts when first used/);
+    const t=m.moveTargets(snap);assert.equal(t.length,1);assert.equal(t[0].free,null);assert.match(m.targetSub(t[0]),/mounts when first used/);
+    assert.equal(m.warning(snap),false,'an idle automount is not a warning');
+    // Without the autofs row the same unlocked-but-unmounted drive still needs Reconnect.
+    assert.equal(m.configuredDriveState(drive,[disk],[]),'Not mounted');
+    assert.equal(m.dataDrives({...snap,mounts:[]})[0].fix.action,'reconnect');
+});
+test('smartmontools install is a fixed Omarchy command in a visible terminal',()=>{
+    const source=fs.readFileSync(path.join(repo,'Panel.qml'),'utf8');
+    assert.match(source,/execDetached\(\["omarchy-launch-floating-terminal-with-presentation", Model\.SMART_INSTALL\]\)/);
+    // No privileged program is ever an argv element the panel executes.
+    assert.doesNotMatch(source,/"(pkexec|sudo|pacman|yay)"/);
 });

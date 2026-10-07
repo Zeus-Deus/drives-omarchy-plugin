@@ -70,6 +70,38 @@ def test_actual_use_including_mmap_and_executable_is_refused(home,tmp_path,kind)
     assert moves.open_users(str(source),proc_root=proc)==[{'pid':123,'name':'fixture-app'}]
 
 
+def test_open_users_names_the_systemd_unit(home,tmp_path):
+    source=folder(home,'data');proc=tmp_path/'proc';pid=proc/'123';(pid/'fd').mkdir(parents=True)
+    (pid/'comm').write_text('python3\n');(pid/'maps').write_text('');(pid/'cwd').symlink_to(source)
+    (pid/'cgroup').write_text('0::/user.slice/user-1000.slice/user@1000.service/app.slice/hermes-serve.service\n')
+    assert moves.open_users(str(source),proc_root=proc)==[{'pid':123,'name':'python3','unit':'hermes-serve.service'}]
+
+
+def test_leftover_sockets_move_but_fifos_are_refused_with_the_path(home):
+    import socket
+    source=folder(home,'.hermes');(source/'sub').mkdir()
+    # Bind relative to the folder: pytest temp paths exceed the AF_UNIX limit.
+    cwd=os.getcwd();os.chdir(source/'sub')
+    try:s=socket.socket(socket.AF_UNIX);s.bind('rpc.sock');s.close()
+    finally:os.chdir(cwd)
+    assert moves.tree_stats(str(source),CALLER)['files']==0
+    os.mkfifo(source/'sub'/'pipe')
+    with pytest.raises(Failure,match='sub/pipe'):moves.tree_stats(str(source),CALLER)
+
+
+def test_outside_hardlink_refusal_names_an_example_file(home,tmp_path):
+    source=folder(home,'data');(source/'a.bin').write_bytes(b'x')
+    os.link(source/'a.bin',home/'outside.bin')
+    with pytest.raises(Failure,match=r'1 file\(s\).*a\.bin'):moves.tree_stats(str(source),CALLER)
+
+
+def test_tree_stats_reports_progress(home):
+    source=folder(home,'data')
+    for i in range(12):(source/str(i)).write_bytes(b'x')
+    seen=[];moves.tree_stats(str(source),CALLER,seen.append)
+    assert seen and seen[-1]==12
+
+
 def test_nonmatching_process_paths_do_not_false_match(home,tmp_path):
     source=folder(home,'data');proc=tmp_path/'proc';pid=proc/'123';(pid/'fd').mkdir(parents=True)
     (pid/'comm').write_text('fixture-app');(pid/'maps').write_text('7f00-7fff rw-s 00000000 00:01 42 '+str(source)+'-other/file\n')
@@ -128,7 +160,7 @@ def test_assessment_is_readonly_and_reports_required_preparation(admission,monke
     assert a.c.records('moves')==[] and a.c.records('drives')==[]
     assert (pathlib.Path(a.dest)/'existing').read_bytes()==b'untouched fixture'
 
-@pytest.mark.parametrize('kind',['special','nested','hardlink','active','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
+@pytest.mark.parametrize('kind',['special','nested','hardlink','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
 def test_assessment_checks_real_refusals_before_any_preparation(admission,monkeypatch,kind):
     from helper import preparedrive,offline,maintenance
     import topology
@@ -137,7 +169,6 @@ def test_assessment_checks_real_refusals_before_any_preparation(admission,monkey
     if kind=='special':os.mkfifo(pathlib.Path(a.src)/'pipe')
     elif kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/nested'})
     elif kind=='hardlink':os.link(pathlib.Path(a.src)/'state.sqlite',pathlib.Path(a.dest)/'alias')
-    elif kind=='active':monkeypatch.setattr(moves,'open_users',lambda p:[{'pid':123,'name':'fixture-app'}])
     elif kind=='space':monkeypatch.setattr(moves.os,'statvfs',lambda p:types.SimpleNamespace(f_bavail=0,f_frsize=4096))
     elif kind=='keyfile':monkeypatch.setattr(offline,'crypttab_key',lambda m:(_ for _ in ()).throw(Failure('fixture missing keyfile')))
     elif kind=='system-destination':monkeypatch.setattr(topology,'classify',lambda *a:[{'name':'/dev/data','system':True}])
@@ -293,29 +324,46 @@ def test_cancel_parent_identity_survives_reboot_device_renumbering(scheduling,mo
 
 def test_schedule_repeats_admission_never_trusts_assessment(scheduling,monkeypatch):
     a=scheduling;assert a.m.assess(a.src,a.dest)['ok']
-    monkeypatch.setattr(moves,'open_users',lambda p:[{'pid':123,'name':'fixture-app'}])
-    with pytest.raises(Failure,match='active use'):a.m.schedule_move(a.src,a.dest,True)
+    os.mkfifo(pathlib.Path(a.src)/'late-pipe')
+    with pytest.raises(Failure,match='special'):a.m.schedule_move(a.src,a.dest,True)
     assert a.calls==[] and a.c.records('moves')==[]
 
-@pytest.mark.parametrize('kind',['active','special','keyfile','journal','pending'])
+def test_apps_using_the_folder_are_reported_not_refused(admission,monkeypatch):
+    # The maintenance boot runs after a normal shutdown closed every app and
+    # service, and independently refuses any non-root process; assessment only
+    # tells the user what the restart will close.
+    a=admission;users=[{'pid':123,'name':'hermes','unit':'hermes-serve.service'}]
+    monkeypatch.setattr(moves,'open_users',lambda p:users)
+    result=a.m.assess(a.src,a.dest)
+    assert result['ok'] is True and result['inUse']==users
+    assert a.c.records('moves')==[]
+
+def test_maintenance_boot_still_refuses_any_user_process():
+    # The guarantee the in-session heads-up relies on, pinned here.
+    from helper import maintenance_audit as audit
+    import inspect
+    src=inspect.getsource(audit.validate_snapshot)
+    assert "if process['uid']!=[0,0,0,0]:raise Failure('non-root process blocks maintenance')" in src
+    assert "if snapshot['sessions'] or snapshot['jobs']:raise Failure" in src
+
+@pytest.mark.parametrize('kind',['special','keyfile','journal','pending'])
 def test_schedule_all_checks_before_preparation(scheduling,monkeypatch,kind):
     from helper import maintenance,offline
     a=scheduling
-    if kind=='active':monkeypatch.setattr(moves,'open_users',lambda p:[{'pid':123,'name':'fixture-app'}])
-    elif kind=='special':os.mkfifo(pathlib.Path(a.src)/'pipe')
+    if kind=='special':os.mkfifo(pathlib.Path(a.src)/'pipe')
     elif kind=='keyfile':monkeypatch.setattr(offline,'crypttab_key',lambda m:(_ for _ in ()).throw(Failure('fixture no key')))
     elif kind=='journal':a.c.journal('moves','a'*32,{'id':'a'*32,'state':'awaiting-maintenance','source':a.src})
     else:maintenance.LATCH.write_bytes(b'fixture malformed')
     with pytest.raises(Failure):a.m.schedule_move(a.src,a.dest,True)
     assert a.calls==[]
 
-@pytest.mark.parametrize('kind',['active','source-replaced','dest-replaced','topology-changed','prepare-failed','create-failed','latch-failed','journal-failed'])
+@pytest.mark.parametrize('kind',['special','source-replaced','dest-replaced','topology-changed','prepare-failed','create-failed','latch-failed','journal-failed'])
 def test_partial_schedule_failure_retains_journal_and_discloses_preparation(scheduling,monkeypatch,kind):
     from helper import preparedrive
     a=scheduling;prepare=preparedrive.run_isolated
     def raced(path,expected=None):
         result=prepare(path,expected)
-        if kind=='active':monkeypatch.setattr(moves,'open_users',lambda p:[{'pid':123,'name':'fixture-app'}])
+        if kind=='special':os.mkfifo(pathlib.Path(a.src)/'late-pipe')
         elif kind in ('source-replaced','dest-replaced'):
             p=pathlib.Path(a.src if kind=='source-replaced' else a.dest);p.rename(p.with_name(p.name+'-original'));p.mkdir()
             if os.geteuid()==0 and kind=='source-replaced':os.chown(p,CALLER,CALLER)
@@ -387,3 +435,38 @@ def test_root_private_ancestor_cannot_be_used_to_expose_owned_source(home,monkey
         return s
     monkeypatch.setattr(pathlib.Path,'stat',private)
     with pytest.raises(Failure,match='ancestor|unreadable'):moves.protected(str(source),CALLER)
+
+
+def test_wake_starts_only_a_configured_idle_automount(tmp_path,monkeypatch):
+    c=Common(tmp_path/'state');m=moves.MoveManager(c)
+    calls=[];monkeypatch.setattr(moves,'run',lambda argv,**k:calls.append(argv) or (b'data.mount\n' if argv[0]=='systemd-escape' else b''))
+    monkeypatch.setattr(moves,'safe_path',lambda p:pathlib.Path(p))
+    monkeypatch.setattr(moves,'read_regular',lambda *a,**k:b'')
+    autofs=[{'target':'/data','fstype':'autofs'}]
+    monkeypatch.setattr(moves,'mount_rows',lambda:autofs)
+    m.wake('/data');assert calls==[],'unknown mountpoint must not be started'
+    c.journal('drives','a'*32,{'id':'a'*32,'state':'ready','mountpoint':'/data'})
+    m.wake('/data');assert calls[-1]==['systemctl','start','data.mount']
+    calls.clear();monkeypatch.setattr(moves,'mount_rows',lambda:autofs+[{'target':'/data','fstype':'btrfs'}])
+    m.wake('/data');assert calls==[],'already mounted: nothing to start'
+    calls.clear();monkeypatch.setattr(moves,'mount_rows',lambda:[])
+    m.wake('/data');assert calls==[],'no automount at all: missing drive, nothing to start'
+    for bad in (None,'',"data",123):m.wake(bad)
+    assert calls==[]
+
+
+def test_wake_accepts_a_hand_made_fstab_drive(tmp_path,monkeypatch):
+    c=Common(tmp_path/'state');m=moves.MoveManager(c)
+    calls=[];monkeypatch.setattr(moves,'run',lambda argv,**k:calls.append(argv) or b'mnt-big.mount\n')
+    monkeypatch.setattr(moves,'safe_path',lambda p:pathlib.Path(p))
+    monkeypatch.setattr(moves,'mount_rows',lambda:[{'target':'/mnt/big','fstype':'autofs'}])
+    monkeypatch.setattr(moves,'read_regular',lambda *a,**k:b'/dev/mapper/big /mnt/big btrfs nofail,x-systemd.automount 0 0\n')
+    m.wake('/mnt/big');assert calls[-1][:2]==['systemctl','start']
+
+
+def test_user_operations_wake_the_drive_but_status_never_does():
+    import inspect
+    for name in ('assess','schedule_move','request','delete_old','discard_destination'):
+        assert 'self.wake(' in inspect.getsource(getattr(moves.MoveManager,name)),name
+    for name in ('inspect','bound','destination'):
+        assert 'self.wake(' not in inspect.getsource(getattr(moves.MoveManager,name)),name

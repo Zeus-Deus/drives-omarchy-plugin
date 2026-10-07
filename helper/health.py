@@ -56,6 +56,8 @@ class HealthCache:
         """Current verdicts; starts a background refresh when stale."""
         with self.lock:
             stale=self.at is None or self.clock()-self.at>TTL
+            # Installed since the last check (panel's install button): recheck now.
+            if not stale and self.values.get('*',{}).get('reason')=='smartmontools is not installed' and shutil.which('smartctl'):stale=True
             if stale and not self.running:
                 self.running=True;threading.Thread(target=self.refresh,daemon=True).start()
             return {'checkedAgo':None if self.at is None else int(self.clock()-self.at),'disks':dict(self.values)}

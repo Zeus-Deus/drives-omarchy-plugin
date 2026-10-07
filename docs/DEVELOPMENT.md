@@ -25,7 +25,22 @@ omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml
 ```
 
-Latest installed Move back checkpoint (VM): **445 Python passed as root, 9
+Latest checkpoint, seamless-UX fixes (VM, 2026-10-07): **455 Python passed as
+root, 11 skipped; 108 Node passed**; plugin validates; qmllint warning set
+unchanged from HEAD. Installed and driven in the VM: an idle-automount `/data`
+after boot is checked and mounted on demand (old build: "Choose a mounted data
+drive"); choosing the folder opens the review in about 1.3 s with no extra
+button; a user service and a transient unit holding `~/Pictures` are named in
+the review instead of refusing; the move and a later Undo both completed with
+identical checksums, and the holding service came back by itself after each
+restart; a leftover socket file moved and came back. Setting up a second drive
+showed no udiskie password window or polkit mount prompt, with `HintIgnore` on
+both the partition and the opened volume.
+
+`tests/conftest.py` replaces `hide_from_automount` for every test: as root in
+the guest it would otherwise write a real udev rule for a fixture disk.
+
+Previous installed Move back checkpoint (VM): **445 Python passed as root, 9
 GTK tests skipped; 98 Node passed.** The skipped GTK source is unchanged from
 the earlier separate native-widget run below. Installed tests proved latest
 files returning after deletion of the original copy, preserving edits,
@@ -122,7 +137,8 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 | Crash at copying, verifying, placeholder, fstab, quarantine-prepared | Original restored unchanged, move paused. |
 | Crash during Undo | Undo finished on the next boot. |
 | Undo after a new file was added | Refused; new file kept. |
-| Active fd/cwd/mmap, unreadable subtree, FIFO, nested mount, outside hardlink, too little space | Refused with a clear message; closed-app retry succeeds. Names such as `.config` or `.ssh` no longer decide admission. |
+| Unreadable subtree, FIFO, nested mount, outside hardlink, too little space | Refused with a clear message. Names such as `.config` or `.ssh` no longer decide admission. |
+| Folder in use by a background service and a running program | Named in the review, not refused; moved and undone across restarts with identical checksums; the service restarted by itself. |
 | Destination unplugged before the maintenance boot | "Drive not connected"; nothing changed; folder still usable. |
 | Drive re-plugged after boot | Reconnect from the panel brings back the drive and its moved folder; checksum identical. |
 | Keyfile removed (reinstall), restart | Helper starts, no stray password dialog, wrong passphrase refused, recovery passphrase restores the drive and both moved folders. |

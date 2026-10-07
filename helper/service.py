@@ -85,7 +85,9 @@ class Server:
         def work():
             worker_started.set()
             try:
-                manager=MoveManager(self.c,uid=uid if method in ('AssessMove','ScheduleMove') else (None if uid==0 else uid),isolated=True)
+                # Live count of entries checked, shown on the panel while it works.
+                def progress(n):job['progress']={'entries':int(n),'at':time.time()}
+                manager=MoveManager(self.c,uid=uid if method in ('AssessMove','ScheduleMove') else (None if uid==0 else uid),isolated=True,progress=progress)
                 if method=='ProvisionDrive':
                     from helper.provisioning import provision
                     result=provision(args[0],secret,self.c)

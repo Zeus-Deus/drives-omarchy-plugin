@@ -30,6 +30,9 @@ BarWidget {
     property var assessment: null
     property int assessmentEpoch: 0
     property var scheduledRequest: null
+    // Ticks once a second while a safety check runs, for the elapsed time.
+    property real assessNow: 0
+    Timer { interval: 1000; repeat: true; running: root.opened && root.assessment !== null && root.assessment.state === "running"; onTriggered: root.assessNow = Date.now() }
     property int scheduledEpoch: -1
     onMoveSourceChanged: invalidateAssessment()
     onMoveTargetChanged: invalidateAssessment()
@@ -107,11 +110,13 @@ BarWidget {
             apps.forEach(function(a) { out.push({kind: "app", id: a.id}); });
             if (restartArmed) out.push({kind: "act", id: "restart"});
         } else if (view === "system") {
+            if (sysRow && sysRow.health && sysRow.health.install) out.push({kind: "act", id: "install_smart"});
             spaceRows.forEach(function(r) { out.push({kind: "space", id: r.path || "system"}); });
             if (spaceCount.hidden > 0 && !showAllSpace) out.push({kind: "act", id: "showall"});
             apps.forEach(function(a) { if (a.movable) out.push({kind: "app", id: a.id}); });
         } else if (view === "drive" && chosenDrive) {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
+            if (chosenDrive.health && chosenDrive.health.install) out.push({kind: "act", id: "install_smart"});
             if (chosenDrive.usage && targets.some(function(t) { return t.mountpoint === chosenDrive.usage.target; })) out.push({kind: "act", id: "move_here"});
             folderRows.forEach(function(f) { if (cdConfigured && f.move.destMount === chosenDrive.drive.mountpoint) out.push({kind: "move", id: f.id}); });
             if (cdConfigured) out.push({kind: "act", id: "export"});
@@ -151,7 +156,7 @@ BarWidget {
         }
         if (view === "progress") {
             var j = Model.jobText(watchedJob);
-            return [j.state === "failed" ? "󰀦" : (j.state === "done" ? "󰄬" : "󰔟"), j.title, j.state === "running" ? "working · you can close this panel" : (j.state === "failed" ? Model.jobFailureHint(watchedJob) : "done")];
+            return [j.state === "failed" ? "󰀦" : (j.scheduled ? "󰔟" : (j.state === "done" ? "󰄬" : "󰔟")), j.title, Model.jobMeta(watchedJob)];
         }
         return ["󰋊", "Drives", Model.overviewMeta(storage)];
     }
@@ -216,10 +221,27 @@ BarWidget {
     }
     function addNext() { if (!serialOk) return false; addStep = 2; cursor = 0; catcher.forceActiveFocus(); return true; }
     function openMoveFolder(source, dest) {
-        folderField.text = source || "";
+        // Show the familiar ~ form only when it round-trips byte for byte.
+        var s = source || "";
+        folderField.text = home && s.indexOf(home + "/") === 0 && s.indexOf("~") < 0 ? "~" + s.slice(home.length) : s;
         moveTarget = dest || (targets.length ? targets[0].mountpoint : "");
         go("move");
         cursor = Math.max(0, navIndex("target", moveTarget));
+        // Folder and drive are both known: start checking right away instead
+        // of waiting for a button the user has to discover.
+        if (s !== "" && moveTarget !== "") autoReview();
+    }
+    // Start the safety check for the current folder/drive, quietly doing
+    // nothing when the input is incomplete (no error banner for half-typed paths).
+    function autoReview() {
+        if (!Model.typedFolder(folderField.text, home).path) return;
+        if (!targets.some(function(t) { return t.mountpoint === moveTarget; })) return;
+        reviewMove();
+    }
+    function chooseTarget(mountpoint) {
+        moveTarget = mountpoint;
+        cursor = Math.max(0, navIndex("target", mountpoint));
+        autoReview();
     }
     function moveCursor(dy) { pointerGate.reset(); if (nav.length) cursor = Math.max(0, Math.min(nav.length - 1, cursor + dy)); }
     function ensureVisible(item) {
@@ -238,13 +260,20 @@ BarWidget {
         else if (n.kind === "move") openMove(n.id);
         else if (n.kind === "pick") { selectedDiskId = n.id; serialField.forceActiveFocus(); }
         else if (n.kind === "opt") { if (n.id === "erase") eraseDisk = !eraseDisk; else if (n.id === "manual" || autoAllowed) autoUnlock = n.id === "auto"; }
-        else if (n.kind === "target") { moveTarget = n.id; }
+        else if (n.kind === "target") { chooseTarget(n.id); }
         else if (n.kind === "act") act(n.id);
     }
     function act(op) {
         if (op === "home") return go("overview");
         if (op === "showall") { showAllSpace = true; return; }
         if (op === "move_here" && chosenDrive && chosenDrive.usage) return openSystem(chosenDrive.usage.target);
+        if (op === "install_smart") {
+            // Omarchy's own installer in its floating terminal; the password
+            // prompt is the terminal's, never the panel's. Fixed literal command.
+            close();
+            Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", Model.SMART_INSTALL]);
+            return;
+        }
         if (op === "restart")
             return ask("Restart now?\nOpen windows close. This restart takes a little longer while the folder is handled, then your desktop comes back.",
                        function() { close(); Quickshell.execDetached(["omarchy-system-reboot"]); }, "Restart");
@@ -306,7 +335,8 @@ BarWidget {
         if (assessment && assessment.state === "running") return;
         if (assessment && assessment.state === "review") return showMoveReview();
         var req = {op: "assess_move", src: moveSource, destMount: moveTarget};
-        assessment = {epoch: assessmentEpoch, source: req.src, destMount: req.destMount, request: req, jobId: "", state: "running", error: ""};
+        assessment = {epoch: assessmentEpoch, source: req.src, destMount: req.destMount, request: req, jobId: "", state: "running", error: "", started: Date.now()};
+        assessNow = Date.now();
         service.error = "";
         if (service.submit(req) === false) {
             assessment = {epoch: assessmentEpoch, source: req.src, destMount: req.destMount, request: req,
@@ -362,7 +392,7 @@ BarWidget {
         rollback_move: ["󰕌", "Undo move…", ""], delete_old_copy: ["󰆴", "Delete old copy…", "bad"], cancel_move: ["󰜺", "Cancel move…", ""],
         move_back: ["󰕌", "Move back…", ""],
         prepare: ["󰒓", "Prepare for moves…", ""], reconnect: ["󰌆", "Reconnect drive", ""], recover: ["󰌆", "Unlock with recovery passphrase…", ""], export: ["󰈔", "Export header backup", ""],
-        move_here: ["󰉒", "Move folder here…", ""],
+        move_here: ["󰉒", "Move folder here…", ""], install_smart: ["󰏗", "Install smartmontools for health checks…", ""],
         provision: ["󰌾", "Encrypt & set up…", ""], review: ["󰉒", "Review move…", ""], home: ["󰋊", "Back to drives", ""], showall: ["󰁅", "Show all folders", ""]
     })
 
@@ -890,6 +920,8 @@ BarWidget {
                                 tone: h.state === "failing" || h.state === "warning" ? "bad" : (h.state === "passed" ? "ok" : "dim")
                             }
                         }
+                        Note { visible: !!(root.sysRow && root.sysRow.health && root.sysRow.health.install); text: root.sysRow && root.sysRow.health ? root.sysRow.health.reason : "" }
+                        ActionRow { visible: !!(root.sysRow && root.sysRow.health && root.sysRow.health.install); op: "install_smart" }
                         Meter {
                             readonly property var segs: Model.systemSegments(root.storage)
                             width: content.width
@@ -1040,6 +1072,7 @@ BarWidget {
                         Note { visible: text !== ""; text: root.cd.fix ? root.cd.fix.hint : ""; color: Color.urgent }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "reconnect"; op: "reconnect" }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "recover"; op: "recover" }
+                        ActionRow { visible: !!(root.cd.health && root.cd.health.install); op: "install_smart" }
 
                         Note { visible: root.cd.manual === true; text: "Set up outside this panel. Drives shows it and its folders but doesn't change its crypttab or fstab lines."; }
                         Note { visible: root.cd.manual === true && Model.targetIssue(root.cd) !== ""; text: Model.targetIssue(root.cd) }
@@ -1216,7 +1249,7 @@ BarWidget {
                         visible: root.view === "move"
 
                         SectionHead { label: "FOLDER"; trail: "" }
-                        Field { id: folderField; width: content.width; placeholderText: "~/Videos"; Keys.onReturnPressed: { catcher.forceActiveFocus(); root.cursor = 0; } }
+                        Field { id: folderField; width: content.width; placeholderText: "~/Videos"; Keys.onReturnPressed: { catcher.forceActiveFocus(); root.cursor = 0; root.autoReview(); } }
                         SectionHead { label: "MOVE TO"; trail: "" }
                         Repeater {
                             model: root.targets.length
@@ -1228,8 +1261,8 @@ BarWidget {
                                 icon: t.mountpoint === root.moveTarget ? "◉" : "○"
                                 iconColor: t.mountpoint === root.moveTarget ? Color.accent : root.ink
                                 title: t.title || ""
-                                sub: Model.display(t.mountpoint) + " · " + Model.compact(t.free) + " free"
-                                onChosen: root.moveTarget = t.mountpoint
+                                sub: Model.targetSub(t)
+                                onChosen: root.chooseTarget(t.mountpoint)
                             }
                         }
                         Note { visible: root.targets.length === 0 && Model.blockedTargets(root.storage).length === 0; text: "No drive can take a folder yet. Set up a drive that unlocks with Omarchy first." }
@@ -1248,7 +1281,7 @@ BarWidget {
                                 ["✓", "The path stays the same. Apps keep using it; the files live on the drive."],
                                 ["✓", "It moves during a restart, when nothing else uses it. Every file is checked."],
                                 ["✓", "The old copy stays until you delete it, so Undo works until then."],
-                                ["!", "Safety assessment checks actual use, ownership, files and storage. Close apps using this folder and retry if refused; hidden folders and dormant profiles are not refused just for their names."]
+                                ["✓", "Apps using it don't need to be closed first; the restart closes them cleanly."]
                             ]
                             Check {
                                 required property var modelData
@@ -1277,12 +1310,26 @@ BarWidget {
                             }
                             Text {
                                 width: parent.width - assessmentSpinner.width - Style.space(8)
-                                text: "Safety assessment · checking files, apps using the folder, and the destination… No administrator authorization or storage changes."
+                                text: Model.assessProgress(root.assessment ? root.assessment.source : "", root.assessmentJob, root.assessNow - (root.assessment ? root.assessment.started || root.assessNow : root.assessNow)) + "\nSafety check · nothing changes yet, no password needed."
                                 color: root.ink
                                 wrapMode: Text.WordWrap
                                 font.family: root.face
                                 font.pixelSize: Style.font.bodySmall
                                 textFormat: Text.PlainText
+                            }
+                        }
+                        Rectangle {
+                            id: assessTrack
+                            width: content.width
+                            height: Style.space(2)
+                            visible: root.assessment !== null && root.assessment.state === "running"
+                            color: Util.alpha(root.ink, 0.1)
+                            clip: true
+                            Rectangle {
+                                width: assessTrack.width * 0.25
+                                height: parent.height
+                                color: Color.accent
+                                NumberAnimation on x { from: -assessTrack.width * 0.25; to: assessTrack.width; duration: 1400; loops: Animation.Infinite; running: assessTrack.visible && root.opened }
                             }
                         }
                         Note {
@@ -1297,7 +1344,7 @@ BarWidget {
                         }
                         ActionRow {
                             op: "review"
-                            title: root.assessment && root.assessment.state === "failed" ? "Retry assessment…" : (root.assessment && root.assessment.state === "review" ? "Review move…" : "Check & review move…")
+                            title: root.assessment && root.assessment.state === "failed" ? "Check again" : (root.assessment && root.assessment.state === "review" ? "Review move…" : (root.assessment && root.assessment.state === "running" ? "Checking…" : "Check & review move…"))
                             enabled: root.canWrite && root.seamlessMoves && root.moveSource !== "" && root.moveTarget !== "" && (!root.assessment || root.assessment.state !== "running")
                         }
                     }
@@ -1363,7 +1410,7 @@ BarWidget {
 
                         Note { visible: parent.j.state === "running"; text: "The helper owns this step. Omarchy may ask for your password first."; color: root.ink }
                         Note { visible: parent.j.state === "failed"; text: parent.j.error || ""; color: Color.urgent }
-                        Note { visible: root.jobDone && root.restartArmed; text: "Save your work, then restart to move the folder. This restart takes a little longer than usual."; color: root.ink }
+                        Note { visible: root.jobDone && root.restartArmed; text: "Nothing has moved yet. Save your work, then restart: apps and services close cleanly, the folder moves, and they start again afterwards. This restart takes a little longer than usual."; color: root.ink }
                         ActionRow { visible: root.jobDone && root.restartArmed; op: "restart" }
                         ActionRow { op: "home" }
                     }

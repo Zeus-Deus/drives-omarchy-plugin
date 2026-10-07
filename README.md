@@ -19,10 +19,12 @@ A bar widget and panel for encrypted data drives on Omarchy Quattro.
 ## How moves work
 
 A folder is never moved while you are using it. Choose the folder and a data
-drive in the panel. Drives checks it first, without an administrator prompt.
-If an app or terminal is using it, it names the processes: close them or leave
-the folder, then retry. Hidden folders and dormant app profiles are not
-blocked just because of their names.
+drive in the panel; Drives checks it right away, without an administrator
+prompt. You don't have to close the apps or background services using it: the
+review names them, and the restart that does the move closes them cleanly
+first (services start again on their own afterwards, apps you reopen). Hidden
+folders and dormant app profiles are not blocked just because of their
+names.
 
 Review the move, then authorize **Schedule move** once. Any required drive
 preparation is included in that confirmation; there is no separate command
@@ -49,8 +51,8 @@ permission to start applications against an absent or uncertain profile.
 
 What will not move: a folder outside your own home, the whole home directory,
 an existing or nested mount, a Btrfs subvolume root, unreadable files,
-active files/mappings/programs, sockets/FIFOs/devices, and files hardlinked
-from outside the folder. The panel says why instead of skipping anything.
+FIFOs/devices, and files hardlinked from outside the folder (the panel names
+an example file). Leftover socket files are moved like other files. The panel says why instead of skipping anything.
 Links inside a folder are preserved as links, without copying their targets.
 Closed SQLite databases and app settings are assessed like other files;
 this is not a promise of compatibility with every application's storage setup.
@@ -80,8 +82,15 @@ sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh
 The first adds **Drives** to your bar. On its own it is a read-only overview.
 The second installs the small root helper that sets up drives and moves
 folders; read it first if you like, it is short. Everything it needs
-(`cryptsetup`, `rsync`, `btrfs-progs`, `python-gobject`, `gtk4`,
-`smartmontools`) is already part of a standard Omarchy install.
+(`cryptsetup`, `rsync`, `btrfs-progs`, `python-gobject`, `gtk4`) is already
+part of a standard Omarchy install.
+
+Disk health (SMART) is optional and needs `smartmontools`, which Omarchy does
+not ship. The panel offers to install it, or run:
+
+```sh
+omarchy pkg add smartmontools
+```
 
 Update later with `omarchy plugin update io.github.zeus-deus.drives` and
 `omarchy-restart-shell`. When the helper changed too, run the same `install.sh`

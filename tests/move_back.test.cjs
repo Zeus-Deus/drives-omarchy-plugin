@@ -34,6 +34,8 @@ test('a returned local folder can be selected for another move without a stale S
     const snapshot={moves:[move],sizes:{home:'/home/u',entries:[{path:move.source,bytes:1024}],extras:{},homeBytes:1024,complete:true}};
     const row=m.spaceRows(snapshot,0).find(r=>r.path===move.source);
     assert.equal(row.movable,true);assert.equal(row.moveId,'');
-    const history=m.folderRows(snapshot)[0];
-    assert.equal(history.status,'moved back');assert.match(history.label,/←.*\/home/);assert.doesNotMatch(history.label,/→.*\/data/);
+    // Moved back means it is an ordinary local folder again: not listed (or
+    // counted) under MOVED FOLDERS, but its record stays openable from history.
+    assert.equal(m.folderRows(snapshot).length,0);
+    assert.equal(m.moveStage(move,null),'returned');
 });

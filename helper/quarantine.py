@@ -17,7 +17,9 @@ def closed_hardlinks(path):
         for name in dirs+files:
             s=os.lstat(os.path.join(root,name))
             if stat.S_ISDIR(s.st_mode):continue
-            if not (stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode)):raise Failure('special file cannot be quarantined')
+            # Leftover sockets are inert names (their owners stopped before the
+            # maintenance boot); rsync -a recreates them. FIFOs/devices are not.
+            if not (stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or stat.S_ISSOCK(s.st_mode)):raise Failure('special file cannot be quarantined')
             if s.st_nlink>1:
                 key=(s.st_dev,s.st_ino)
                 expected,count=groups.get(key,(s.st_nlink,0))

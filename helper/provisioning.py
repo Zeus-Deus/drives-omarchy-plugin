@@ -1,6 +1,6 @@
 """Guarded drive provisioning. Existing LUKS headers are never reformatted."""
 import os,pathlib,re,stat,time,uuid,json
-from helper.common import Failure,run,atomic,mount_rows,read_regular,escape_fstab,prepare_mountpoint
+from helper.common import Failure,run,atomic,mount_rows,read_regular,escape_fstab,prepare_mountpoint,hide_from_automount
 from topology import snapshot,blocks,chains,probe
 
 from helper.driveconfig import finish
@@ -65,6 +65,10 @@ def provision(request,secret,common):
     def stage(value):j['state']=value;j['updated']=time.time();common.journal('drives',id,j)
     try:
         stage('partitioning')
+        # Hide the disk from desktop automount (udiskie) before anything on it
+        # changes; the final per-volume rule replaces this once LUKS exists.
+        try:hide_from_automount(req['name'],serial=req['serial'])
+        except Failure:pass  # unusual serial: the per-volume rule below still applies
         # UDisks owns GPT creation and the encrypted filesystem format.
         from gi.repository import GLib
         obj=block_object(device)
@@ -76,6 +80,11 @@ def provision(request,secret,common):
         # our public helper protocol accepts only a sealed FD and never echoes it.
         udisks_call(part_obj,'Block','Format','(sa{sv})',('btrfs',{'encrypt.type':GLib.Variant('s','luks2'),'encrypt.passphrase':GLib.Variant('s',secret.decode('utf-8')),'label':GLib.Variant('s',req['name'])}))
         run(['udevadm','settle']);stage('encrypted')
+        # The LUKS UUID exists now: hide the partition and its opened volume
+        # before it is closed and reopened below (each emits a desktop event).
+        # Best-effort here; finish() writes and validates the same rule again.
+        try:hide_from_automount(req['name'],run(['blkid','-s','UUID','-o','value',part]).decode().strip())
+        except Failure:pass
         keypath.parent.mkdir(mode=0o700,exist_ok=True)
         fd=os.open(keypath,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
         try:os.write(fd,os.urandom(64));os.fsync(fd)

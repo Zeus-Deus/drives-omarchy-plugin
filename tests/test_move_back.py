@@ -120,15 +120,17 @@ def test_return_admission_accepts_current_copy_without_previous_original(tmp_pat
     assert manager.inspect()[0]['canMoveBack'] is False
 
 @pytest.mark.parametrize('busy_path',['source','dest'])
-def test_return_active_use_refusal_names_the_blocking_process(tmp_path,monkeypatch,busy_path):
+def test_return_active_use_is_only_refused_inside_maintenance(tmp_path,monkeypatch,busy_path):
     manager,j,_,_,_,_=admission_fixture(tmp_path,monkeypatch)
     monkeypatch.setattr(moves,'open_users',lambda path:[{'pid':42,'name':'writer'}] if path==j[busy_path] else [])
-    with pytest.raises(Failure,match='writer.*42'):manager.return_admission(j)
+    # In the normal session the restart closes these users first.
+    assert manager.return_admission(j)['files']==1
+    with pytest.raises(Failure,match='writer.*42'):manager.return_admission(j,offline=True)
     assert pathlib.Path(j['dest'],'latest').read_bytes()==b'latest SSD data'
 
 
 @pytest.mark.parametrize('unsafe',['protocol','state','foreign-bind','nested-source','nested-dest','stacked-bind','parent',
-    'source-mount','uuid','root-readonly','active-source','active-dest','special','external-link','space','foreign-fstab','manual-fstab','ownership','no-private'])
+    'source-mount','uuid','root-readonly','special','external-link','space','foreign-fstab','manual-fstab','ownership','no-private'])
 def test_return_admission_refuses_unsafe_inputs_without_arming(tmp_path,monkeypatch,unsafe):
     manager,j,tab,ownership,rows,topology=admission_fixture(tmp_path,monkeypatch)
     monkeypatch.setattr(manager,'latch',lambda *a:pytest.fail('unsafe return armed'))
@@ -141,8 +143,6 @@ def test_return_admission_refuses_unsafe_inputs_without_arming(tmp_path,monkeypa
     elif unsafe=='source-mount':j['sourceMount']='/data'
     elif unsafe=='uuid':topology['chain'][0]['uuid']='FOREIGN'
     elif unsafe=='root-readonly':topology['mount']['options']='ro'
-    elif unsafe.startswith('active-'):
-        monkeypatch.setattr(moves,'open_users',lambda p:[{'pid':42,'name':'writer'}] if p==j['source' if unsafe=='active-source' else 'dest'] else [])
     elif unsafe=='special':os.mkfifo(pathlib.Path(j['dest'])/'pipe')
     elif unsafe=='external-link':os.link(pathlib.Path(j['dest'])/'latest',tmp_path/'outside-hardlink')
     elif unsafe=='space':monkeypatch.setattr(os,'statvfs',lambda p:type('V',(),{'f_bavail':0,'f_frsize':4096})())
