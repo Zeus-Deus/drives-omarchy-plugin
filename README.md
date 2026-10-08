@@ -46,8 +46,14 @@ refuses while a move is waiting for a restart.
    folder (or type one).
 2. Review the move and enter your password. Nothing moves yet.
 3. Restart. This restart takes a little longer: the folder is copied, every
-   file is checked, then your desktop comes back. Don't turn the computer off
-   during it.
+   file is checked, then your desktop comes back. The screen shows the Omarchy
+   logo with live progress: how much is copied, the speed and the time left.
+   Don't turn the computer off during it.
+
+Want to see that screen first? From a text console (Ctrl+Alt+F3, log in),
+run `python3 -m helper.bootscreen --demo` inside
+`/usr/lib/drives-helper`. It copies Omarchy's own files to a temporary
+folder, checks them and deletes the copy; nothing is moved.
 
 You don't need to close apps first; the restart closes them cleanly. If the
 power goes out halfway, your original folder comes back unchanged.

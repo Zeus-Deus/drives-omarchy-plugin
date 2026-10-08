@@ -31,11 +31,31 @@ class Unsafe(Failure):
 LOG=pathlib.Path('/var/lib/drives-helper/maintenance.log')
 
 
+class NoScreen:
+    """Stand-in while the full-screen progress is off (or failed)."""
+    active=False
+    def step(self,*a,**k):pass
+    def note(self,*a,**k):pass
+    def totals(self,*a,**k):pass
+    def counted(self,*a,**k):pass
+    def finish(self,*a,**k):pass
+
+
+SCREEN=NoScreen()
+
+
 def say(message):
     """Console for the person at the machine; root-private log for afterwards
-    (the maintenance boot's journal is volatile)."""
+    (the maintenance boot's journal is volatile).
+
+    The unit sends stdout to the journal only and stderr to journal+console:
+    while the progress screen owns the console a line goes to the journal and
+    becomes the screen's activity line; otherwise it is printed on the console."""
     line='Drives: '+message
-    print(line,flush=True)
+    if SCREEN.active:
+        print(line,flush=True)
+        SCREEN.note(message[:1].upper()+message[1:])
+    else:print(line,file=sys.stderr,flush=True)
     try:
         fd=os.open(LOG,os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)
         try:os.write(fd,(time.strftime('%Y-%m-%d %H:%M:%S ')+line+'\n').encode());os.fsync(fd)
@@ -234,7 +254,9 @@ class Offline:
         self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
         self.admitted(j,'continue')
         if any(r['target']==j['source'] or r['target'].startswith(j['source']+'/') for r in mount_rows()):raise Failure('nested or existing mount blocks the move')
-        stats=tree_stats(j['source'],j['uid']);closed_hardlinks(j['source'])
+        SCREEN.step('check')
+        stats=tree_stats(j['source'],j['uid'],progress=SCREEN.counted);closed_hardlinks(j['source'])
+        SCREEN.totals(files=stats['files'],total_bytes=stats['bytes'],entries=getattr(getattr(SCREEN,'state',None),'counted',0))
         v=os.statvfs(j['destMount'])
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
         try:
@@ -247,16 +269,17 @@ class Offline:
             moved=move_original(j['source'],j['sourceIdentity'],store)
             original=moved['path']
             # 2. Copy the frozen original.
-            self.stage(j,'copying');say('copying '+str(stats['files'])+' files')
+            self.stage(j,'copying');SCREEN.step('copy',total_bytes=stats['bytes']);say('copying '+str(stats['files'])+' files')
             self.m.private_destination(j)
             run(['/usr/bin/rsync','-aHAXS','--numeric-ids','--delete','--',original+'/',j['dest']+'/'],timeout=24*3600,cap=8*1024*1024)
             self.m.private_destination(j)
             # 3. Full verification: checksums, metadata and counts.
-            self.stage(j,'verifying');say('verifying every file')
-            verification=self.m.verify(original,j['dest'])
+            self.stage(j,'verifying');SCREEN.step('verify',total_bytes=stats['bytes']);say('verifying every file')
+            verification=self.m.verify(original,j['dest'],**screen_kw())
             run(['/usr/bin/sync','-f',j['dest']],timeout=600)
             j['verification']=verification;j['verified']=True;self.c.journal('moves',j['id'],j)
             # 4. Switch: locked placeholder, fstab bind, live proof.
+            SCREEN.step('switch')
             self.admitted(j,'continue')
             self.stage(j,'switching')
             self.m.placeholder(j);qa_crash('placeholder')
@@ -409,7 +432,9 @@ class Offline:
         if os.geteuid()!=0:raise Failure('Move back worker requires root')
         if j['state']=='returned':return 'already returned'
         self.mount_return_origin(j);self.mount_destination(j)
-        self.admitted(j,'return');self.m.return_admission(j,offline=True,full=j['state'] not in maintenance.RETURN_STATES)
+        self.admitted(j,'return')
+        latest=self.m.return_admission(j,offline=True,full=j['state'] not in maintenance.RETURN_STATES)
+        if latest:SCREEN.totals(files=latest['files'],total_bytes=latest['bytes'])
         try:
             if j['state'] in ('return-preparing','return-copying','return-verifying'):return self.pause_return(j)
             if j['state'] in ('return-switching','return-finishing'):
@@ -423,16 +448,16 @@ class Offline:
                 return self.finish_return(j)
             j['returnFrom']=j['state']
             self.stage(j,'return-preparing');content=self.prepare_return(j)
-            self.stage(j,'return-copying');say('copying the latest SSD data back to the original disk')
+            self.stage(j,'return-copying');SCREEN.step('copy');say('copying the latest SSD data back to the original disk')
             self.m.private_destination(j);self.return_store(j)
             run(['/usr/bin/rsync','-aHAXS','--numeric-ids','--delete','--',j['dest']+'/',content+'/'],timeout=24*3600,cap=8*1024*1024)
             self.m.private_destination(j);self.return_store(j)
-            self.stage(j,'return-verifying')
-            j['returnVerification']=self.m.verify(j['dest'],content)
+            self.stage(j,'return-verifying');SCREEN.step('verify')
+            j['returnVerification']=self.m.verify(j['dest'],content,**screen_kw())
             run(['/usr/bin/sync','-f',content],timeout=600)
             self.c.journal('moves',j['id'],j)
             self.admitted(j,'return');self.m.return_admission(j,offline=True,full=False)
-            self.stage(j,'return-switching');self.exchange_return(j,content)
+            SCREEN.step('switch');self.stage(j,'return-switching');self.exchange_return(j,content)
             return self.finish_return(j)
         except Unsafe:raise
         except BaseException as error:raise Unsafe('Move back interrupted; all copies retained: '+str(error)[:200]) from error
@@ -479,11 +504,13 @@ class Offline:
         if j['state']=='switched':
             self.admitted(j,'rollback')
             self.m.changed(original,j['sourceIdentity'],j.get('sourceUUID'))
+            SCREEN.step('verify',total_bytes=(j.get('verification') or {}).get('bytes'))
             changes=diverged(original,j['dest'])
             if changes:
                 j['error']='Undo refused: '+str(len(changes))+' file(s) changed after the move and would be lost. The move is kept.';consume_intent(j);self.c.journal('moves',j['id'],j)
                 return 'undo refused: destination diverged'
             self.stage(j,'rolling-back')
+        SCREEN.step('switch')
         # From here on the only safe direction is forward: finish restoring.
         try:
             from helper.configwriter import write_owned
@@ -507,6 +534,37 @@ class Offline:
         return 'undone'
 
 
+def screen_kw():
+    return {'screen':SCREEN} if SCREEN.active else {}
+
+
+def start_screen(action,source):
+    """Best effort: the progress screen never decides anything about the move."""
+    global SCREEN
+    try:
+        from helper.bootscreen import Screen
+        home=re.sub(r'^/home/[^/]+(?=/|$)','~',source)
+        title={'continue':'Moving '+home,'rollback':'Undoing the move of '+home,'return':'Moving '+home+' back'}.get(action,home)
+        screen=Screen(action,title)
+        if screen.open():SCREEN=screen
+    except Exception:SCREEN=NoScreen()
+
+
+def end_screen(ok,message='',headline='',footer=''):
+    global SCREEN
+    screen=SCREEN
+    try:screen.finish(ok,message,headline=headline,footer=footer)
+    except Exception:pass
+    if not ok and screen.active:
+        # Leave the explanation on screen; normal startup stays blocked or the
+        # machine restarts next, and the same text is in the journal and log.
+        return
+    try:
+        if screen.active:screen.close()
+    except Exception:pass
+    SCREEN=NoScreen()
+
+
 def main():
     if os.geteuid()!=0:raise SystemExit('maintenance worker requires root')
     current=boot_id()
@@ -523,6 +581,7 @@ def main():
     with c.storage_lock():
         j=c.read('moves',latch['moveId'])
         worker=Offline(c,current)
+        start_screen(latch['action'],j['source'])
         say({'continue':'moving ','rollback':'undoing the move of ','return':'returning latest data to '}[latch['action']]+j['source']+'. Do not turn off the computer.')
         try:
             worker.settle()
@@ -541,7 +600,7 @@ def main():
             j=c.read('moves',latch['moveId']);j['needsAttention']=True
             j['error']='Needs attention: '+str(error)[:200]+'. Normal startup is blocked; all copies are retained. Original: '+j.get('backup','?')+' · copy: '+j['dest']
             c.journal('moves',j['id'],j)
-            say(j['error'])
+            say(j['error']);end_screen(False,j['error'],'Needs attention')
             return 1
         except (Failure,OSError,ValueError,KeyError) as error:
             j=c.read('moves',latch['moveId'])
@@ -550,13 +609,18 @@ def main():
             if j['state'] in OFFLINE|maintenance.RETURN_STATES:
                 j['needsAttention']=True
                 j['error']='Recovery could not be established: '+str(error)[:160]+'. Normal startup is blocked; all copies are retained.'
-                c.journal('moves',j['id'],j);say(j['error']);return 1
+                c.journal('moves',j['id'],j);say(j['error']);end_screen(False,j['error'],'Needs attention');return 1
             # Refused while still in a known non-mutating state.
             j['error']='Not moved this time; nothing was changed. Restart again to retry. ('+str(error)[:160]+')'
             consume_intent(j);c.journal('moves',j['id'],j);outcome='refused'
             say(j['error'])
         maintenance.clear_latch(latch['moveId'])
         say(outcome+'. Restarting.')
+        good=outcome in ('moved','undone','returned','already moved','already undone','already returned') or outcome.startswith('request already handled')
+        if good:end_screen(True)
+        elif outcome=='refused':end_screen(False,j.get('error') or outcome,'Not moved this time','Nothing was changed. Restarting into your desktop.')
+        else:end_screen(False,j.get('error') or outcome,'Stopped safely','Nothing was deleted. Restarting into your desktop.')
+        if not good:time.sleep(8) # time to read why before the restart
     run(['/usr/bin/systemctl','--no-block','reboot'],timeout=30)
     return 0
 

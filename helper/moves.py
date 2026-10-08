@@ -516,10 +516,15 @@ class MoveManager:
         safe_path(j['destMount']);safe_path(j['dest']);self.changed(j['destMount'],j['mountIdentity'],j.get('destUUID'))
         if not allow_removed or os.path.lexists(j['dest']):self.changed(j['dest'],j['destIdentity'],j.get('destUUID'))
         self.private_destination(j,allow_removed=allow_removed)
-    def verify(self,src,dest):
+    def verify(self,src,dest,screen=None):
         difference=run(['rsync','-aHAXS','--numeric-ids','--checksum','--dry-run','--itemize-changes','--delete','--',src+'/',dest+'/'],timeout=3600)
         if difference:raise Failure('checksum or metadata comparison differs; original is still kept')
-        a=tree_stats(src);b=tree_stats(dest)
+        if screen is None:a=tree_stats(src);b=tree_stats(dest)
+        else:
+            # Boot screen: the second walk counts on from the first.
+            first=[0];screen.step('compare',count_total=2*screen.state.entries)
+            def one(n):first[0]=n;screen.counted(n)
+            a=tree_stats(src,progress=one);b=tree_stats(dest,progress=lambda n:screen.counted(first[0]+n))
         if a!=b:raise Failure('file count, bytes or metadata differ')
         return a
     def bound(self,j,block=None,rows=None):
