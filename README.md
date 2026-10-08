@@ -1,151 +1,101 @@
 # Drives for Omarchy
 
-A bar widget and panel for encrypted data drives on Omarchy Quattro.
+A bar widget and panel for your disks on Omarchy Quattro.
 
-- See every disk, how full it is, its health (SMART) and live read/write.
-- Set up a new drive: LUKS2 encryption, unlocks with the OS, plus a recovery
-  passphrase for a reinstall or new machine.
-- Move a folder such as `~/Videos` onto the drive while keeping its path. Apps
-  keep using `~/Videos`; the files live on the encrypted drive.
-- Move the latest files back, undo an unchanged move, or delete the old copy.
-- Recover after a reinstall (recovery passphrase) or when a drive was
-  unplugged (reconnect).
-- See what fills your OS disk, biggest folders first, and move one from there.
-- Drives and bind mounts you set up yourself are recognised and shown (how
-  the drive unlocks, which folders are bound from it), never changed.
-- Apps: shows where Steam's game library and Docker's data live, and offers
-  to move Steam's library onto a drive.
-
-## How moves work
-
-A folder is never moved while you are using it. Choose the folder and a data
-drive in the panel; Drives checks it right away, without an administrator
-prompt. You don't have to close the apps or background services using it: the
-review names them, and the restart that does the move closes them cleanly
-first (services start again on their own afterwards, apps you reopen). Hidden
-folders and dormant app profiles are not blocked just because of their
-names.
-
-Review the move, then authorize **Schedule move** once. Any required drive
-preparation is included in that confirmation; there is no separate command
-or preparation step. The folder moves on your next restart; **Restart now**
-is optional. During that restart nothing else runs: the folder is
-copied, every file is checked, and the old path then opens the drive. The
-computer restarts once more into your normal desktop. If power is cut halfway,
-the next start puts your original folder back unchanged.
-
-The original is kept until you choose **Delete old copy**, which is only
-offered after one normal restart with the move working. **Undo** is refused if
-anything changed since the move, so it never loses new work.
-
-**Move back** copies the latest files to their original OS filesystem during a
-restart, including changes and deletions since the move. It verifies everything
-before removing the bind. It still works after **Delete old copy**; the SSD copy
-and any retained original copy are kept, not automatically deleted. It requires
-enough free space on the original filesystem and a plugin-owned private-layout
-move. The confirmation defaults to Cancel.
-
-If recovery cannot establish which complete copy is authoritative, normal
-startup stays blocked for administrator recovery. An invalid request is not
-permission to start applications against an absent or uncertain profile.
-
-What will not move: a folder outside your own home, the whole home directory,
-an existing or nested mount, a Btrfs subvolume root, and files hardlinked from
-outside the folder (the panel names an example file). Everything else moves
-exactly as `sudo rsync -a` would copy it: files owned by other users or not
-readable by you, sockets, FIFOs and device nodes keep their owner and mode.
-Your administrator password is the permission; the panel never skips a file.
-Links inside a folder are preserved as links, without copying their targets.
-Closed SQLite databases and app settings are assessed like other files;
-this is not a promise of compatibility with every application's storage setup.
-
-### Which directions are supported?
-
-Choose among mounted encrypted data drives that unlock with the OS. This is
-not yet a general any-drive-to-any-drive migration tool: an already
-bind-mounted folder cannot be moved to another drive from the panel, and the
-OS disk is not offered as a destination. **Undo** can restore an unchanged
-moved folder to its original storage while the old copy is still kept; it is
-not a migration of new or changed files back to that storage. **Move back** is
-the separate latest-data return path for plugin-owned private-layout moves
-originally on `/`, or a `/home` subvolume of the same OS filesystem. A separate
-`/home` filesystem, handmade binds and older public-copy layouts are not adopted.
-Untouched old plans must be cancelled and reassessed before further copying.
+- See every disk: how full it is, its health and live read/write speed.
+- Set up a new data drive, encrypted, that unlocks together with your OS.
+- Move a big folder (say `~/Videos`) onto that drive. Apps keep using
+  `~/Videos` as before; the files just live on the other drive.
+- Find out what fills your OS disk, and move it from there.
 
 ## Install
 
-Two commands on Omarchy Quattro:
+One line:
 
 ```sh
-omarchy plugin add https://github.com/Zeus-Deus/drives-omarchy-plugin.git --enable --yes
-sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh
+omarchy plugin add https://github.com/Zeus-Deus/drives-omarchy-plugin.git --enable --yes && sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh
 ```
 
-The first adds **Drives** to your bar. On its own it is a read-only overview.
-The second installs the small root helper that sets up drives and moves
-folders; read it first if you like, it is short. Everything it needs
-(`cryptsetup`, `rsync`, `btrfs-progs`, `python-gobject`, `gtk4`) is already
-part of a standard Omarchy install.
+The first part adds **Drives** to your bar. The second installs a small
+system helper that does the disk work (setting up drives, moving folders).
+Without the helper the panel only shows your disks. Everything it needs is
+already part of Omarchy.
 
-Disk health (SMART) is optional and needs `smartmontools`, which Omarchy does
-not ship. The panel offers to install it, or run:
+Disk health needs `smartmontools`. The panel offers to install it.
+
+Update:
 
 ```sh
-omarchy pkg add smartmontools
+omarchy plugin update io.github.zeus-deus.drives && sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh && omarchy-restart-shell
 ```
-
-Update later with `omarchy plugin update io.github.zeus-deus.drives` and
-`omarchy-restart-shell`. When the helper changed too, run the same `install.sh`
-again.
-
-Every write action asks for your administrator password through Omarchy's
-polkit prompt. The recovery passphrase is entered in a separate small window,
-never in the panel.
 
 ## Uninstall
 
-Two commands, in this order (the helper first, while its uninstaller is still
-on disk):
+One line:
 
 ```sh
-sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/uninstall.sh
-omarchy plugin remove io.github.zeus-deus.drives --yes
+sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/uninstall.sh && omarchy plugin remove io.github.zeus-deus.drives --yes
 ```
 
-The uninstaller refuses while a move is scheduled. It keeps drive keys,
-crypttab/fstab entries and your data, so drives still unlock at boot and moved
-folders keep working without the plugin.
+Your drives and moved folders keep working without the plugin. Uninstall
+refuses while a move is waiting for a restart.
 
-## Drives you set up yourself
+## Moving a folder
 
-A LUKS drive you already unlock at boot (crypttab keyfile) and mount in fstab
-shows up as **unlocks with OS**, and the folders you bind-mounted from it are
-listed. Drives never edits its crypttab or fstab lines.
+1. Open **Drives**, choose **What's using it** on your OS disk, and pick a
+   folder (or type one).
+2. Review the move and enter your password. Nothing moves yet.
+3. Restart. This restart takes a little longer: the folder is copied, every
+   file is checked, then your desktop comes back. Don't turn the computer off
+   during it.
 
-To move folders onto such a drive, select it normally. If its top folder
-(for example `/data`) needs preparation, the move review explains and includes
-it in the same authorization. Only that top folder becomes root-owned;
-everything inside keeps its owner and permissions. This is permanent, even
-if you later cancel the move. New top-level folders then require a move through
-Drives or administrator access; existing user-owned folders remain writable.
-Preparation preserves existing read/traverse access using an ACL rather than
-making a private drive public. Each new move also uses a root-private wrapper
-on the SSD, so a profile protected by your home directory is not exposed
-through a second, public path on the drive.
+You don't need to close apps first; the restart closes them cleanly. If the
+power goes out halfway, your original folder comes back unchanged.
+
+## Getting the space back
+
+After a move, **the old copy stays on your OS disk** as a safety net. It is
+not deleted automatically, so the space is not freed yet.
+
+When you're happy with the move:
+
+1. Open **Drives** and click the folder under **Moved folders**.
+2. Choose **Delete old copy** and confirm.
+
+The panel shows how far the deletion is. Big folders take a few minutes. If
+you restart before it finishes, Drives finishes it by itself afterwards.
+
+On Btrfs, snapshots can keep the deleted data for a while, so the free space
+may show up a bit later.
+
+## Changed your mind?
+
+Click the moved folder:
+
+- **Undo move** puts the original back exactly as it was. Only while the old
+  copy still exists, and only if nothing changed since the move.
+- **Move back** copies your latest files back to the OS disk during a
+  restart, including changes since the move. Works even after you deleted
+  the old copy.
 
 ## Good to know
 
-- Auto-unlock stores the drive key on the OS disk, so it is only as safe as
-  your OS disk encryption. The panel refuses auto-unlock on an unencrypted OS
-  disk.
-- Export the LUKS header backup somewhere off this computer.
-- udisks already lets your user format some removable disks without a
-  password. This plugin does not widen that; its own actions all need admin
-  authorization.
-- On Btrfs, snapshots can keep deleted data, so deleting an old copy may not
-  free space right away.
+- Every change asks for your password. The only thing Drives does on its own
+  is finishing a deletion you already confirmed.
+- New drives get a recovery passphrase, for a reinstall or another computer.
+  It is typed in a separate small window, never in the panel.
+- A drive that unlocks with the OS keeps its key on the OS disk, so it is
+  only as safe as your OS disk encryption. Drives refuses this on an
+  unencrypted OS disk.
+- Export the drive's header backup (on the drive's page) and keep it off this
+  computer.
+- Drives and folders you set up by hand are shown, never changed. The first
+  move onto such a drive makes only its top folder (like `/data`)
+  system-owned; everything inside stays yours. The review tells you first.
+- It won't move your whole home folder, folders outside your home, a folder
+  with another drive mounted inside it, or files hard-linked from elsewhere.
 
-Design details: [docs/DESIGN.md](docs/DESIGN.md). Contributor notes and test
-results: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+More detail: [docs/DESIGN.md](docs/DESIGN.md). For contributors:
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 License: MIT.
