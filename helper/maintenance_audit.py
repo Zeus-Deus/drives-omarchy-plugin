@@ -62,8 +62,10 @@ def validate_snapshot(snapshot,move_id,action,caller=AUDIT_UNIT):
     if not snapshot['targetActive']:raise Failure('maintenance target is not active')
     if snapshot['defaultTarget']!=TARGET:raise Failure('maintenance target was not selected at boot')
     if not snapshot['masksComplete']:raise Failure('normal-boot masks are not established')
-    if set(snapshot['targetRequires'])!=REQUIRES or not set(snapshot['targetWants'])<={WORKER_UNIT}:
-        raise Failure('unexpected maintenance dependency closure')
+    extra=sorted((set(snapshot['targetRequires'])-REQUIRES)|(set(snapshot['targetWants'])-{WORKER_UNIT}))
+    missing=sorted(REQUIRES-set(snapshot['targetRequires']))
+    if extra or missing:
+        raise Failure('unexpected maintenance dependency closure'+(': extra '+' '.join(extra) if extra else '')+(': missing '+' '.join(missing) if missing else ''))
     if caller not in (AUDIT_UNIT,WORKER_UNIT) or snapshot['callerUnit']!=caller:raise Failure('maintenance audit must run in its fixed root service')
     if snapshot['sessions'] or snapshot['jobs']:raise Failure('sessions or pending activation block maintenance')
     for unit in snapshot['units']:

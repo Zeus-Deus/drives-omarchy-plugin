@@ -16,6 +16,15 @@ MASKS=('graphical.target','multi-user.target','user@.service','timers.target','p
 BOOT=re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 ACTIVATION_TYPES=('service','socket','timer','path','mount','automount','swap','scope')
 ACTIVATION_DROPIN='zzzz-drives-maintenance.conf'
+# The maintenance target replaces default.target by alias, so systemd also
+# applies everything installed under the *alias* name: `systemctl enable` of any
+# unit with WantedBy=default.target (nordvpnd, for one) lands in
+# default.target.wants/ and would join the maintenance closure. Mask those
+# edges for this boot only; generator.early outranks these directories.
+UNIT_DIRS=('/etc/systemd/system.control','/run/systemd/system.control','/run/systemd/transient','/etc/systemd/system','/etc/systemd/system.attached','/run/systemd/system','/run/systemd/system.attached','/usr/local/lib/systemd/system','/usr/lib/systemd/system','/lib/systemd/system')
+TARGET_NAMES=('default.target','drives-maintenance.target')
+DEPENDENCY_SUFFIXES=('.wants','.requires','.upholds','.d')
+SHARED_DROPIN_DIRS=('target.d','drives-.target.d')
 RETURN_STATES={'return-preparing','return-copying','return-verifying','return-switching','return-finishing'}
 
 
@@ -133,6 +142,32 @@ def link(path,target):
     os.symlink(target,p)
 
 
+def target_dependency_masks(unit_dirs=None):
+    """(directory, entry) pairs installed for the alias or the target itself."""
+    unit_dirs=UNIT_DIRS if unit_dirs is None else unit_dirs
+    from helper.maintenance_audit import REQUIRES,WORKER_UNIT
+    names=[name+suffix for name in TARGET_NAMES for suffix in DEPENDENCY_SUFFIXES]+list(SHARED_DROPIN_DIRS)
+    masks=set()
+    for root in unit_dirs:
+        for name in names:
+            directory=pathlib.Path(root)/name
+            try:entries=os.listdir(directory)
+            except (FileNotFoundError,NotADirectoryError):continue
+            for entry in entries:
+                if name.endswith('.d'):
+                    if entry.endswith('.conf'):masks.add((name,entry))
+                elif entry not in REQUIRES|{WORKER_UNIT}:masks.add((name,entry))
+    return sorted(masks)
+
+
+def neutralize_target_dependencies(early,unit_dirs=None):
+    """Keep the maintenance closure exactly what the package declares, whatever
+    the desktop has enabled. Unreadable dirs fail the generator closed (the
+    shell fallback still selects the target and the audit refuses)."""
+    for directory,entry in target_dependency_masks(unit_dirs):
+        link(private_directory(early/directory,create=True)/entry,'/dev/null')
+
+
 def activation_guards(early,runtime):
     """Deny later unit activation for the whole maintenance boot.
 
@@ -162,6 +197,7 @@ def generate(early_dir,state_dir=STATE,runtime=RUNTIME,current_boot=None):
         early=private_directory(early_dir)
         link(early/'default.target',TARGET)
         for unit in MASKS:link(early/unit,'/dev/null')
+        neutralize_target_dependencies(early)
         private_directory(runtime)
         try:
             saved=control_json(runtime/'boot.json')
@@ -185,6 +221,7 @@ def generate(early_dir,state_dir=STATE,runtime=RUNTIME,current_boot=None):
     # Even a damaged request holds the boot gate closed. No auto-resume.
     link(early/'default.target',TARGET)
     for unit in MASKS:link(early/unit,'/dev/null')
+    neutralize_target_dependencies(early)
     runtime=private_directory(runtime,create=True)
     receipt={'version':1,'bootId':current_boot,'valid':not error,'error':error}
     if value is not None:receipt.update(value)
