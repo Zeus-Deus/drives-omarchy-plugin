@@ -5,7 +5,7 @@ from helper.moves import MoveManager,ACTIVE,ScheduleFailure
 
 BUS='io.github.zeus_deus.Drives';OBJECT='/io/github/zeus_deus/Drives'
 ACTIONS={'ProvisionDrive':'provision','ResumeDrive':'resume-drive','StartMove':'move','ScheduleMove':'move','MoveBack':'move','ResumeMove':'resume','RollbackMove':'rollback','DeleteOldCopy':'delete','CancelMove':'cancel','RestartMove':'restart','ExportHeaderBackup':'export','CancelRestart':'resume','UnlockDrive':'unlock','ReconnectDrive':'reconnect','PrepareDrive':'prepare'}
-SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ReconnectDrive':'s','PrepareDrive':'s','ResumeDrive':'s','StartMove':'ss','AssessMove':'ss','ScheduleMove':'ssb','MoveBack':'s','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
+SIGNATURES={'ProvisionDrive':'sh','UnlockDrive':'sh','ReconnectDrive':'s','PrepareDrive':'s','ResumeDrive':'s','StartMove':'ss','AssessMove':'ss','ScheduleMove':'ssbb','MoveBack':'s','ResumeMove':'s','RollbackMove':'s','DeleteOldCopy':'s','CancelMove':'s','RestartMove':'s','ExportHeaderBackup':'ss','CancelRestart':'s','Status':''}
 
 def pending_restart():
     """The armed maintenance request, as plain facts for the panel."""
@@ -62,7 +62,7 @@ class Server:
             live=(running or {}).get('progress') or {} if m['cleanupRunning'] else {}
             total=int(live.get('total') or saved.get('total') or 0);done=max(int(live.get('entries') or 0),int(saved.get('deleted') or 0))
             m['cleanupProgress']={'deleted':min(done,total) if total else done,'total':total}
-        return {'ok':True,'version':'0.2.0','seamlessMoves':True,'moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
+        return {'ok':True,'version':'0.2.0','seamlessMoves':True,'sharedLinks':True,'moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None,automatic=False):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')

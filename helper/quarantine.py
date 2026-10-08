@@ -9,8 +9,13 @@ from helper.maintenance import private_directory
 from helper.moves import anchored_tree,identity_fd,safe_path
 
 
-def closed_hardlinks(path):
-    """Outside inode aliases would defeat private-directory isolation after boot."""
+def closed_hardlinks(path,allow_external=False):
+    """Outside inode aliases would defeat private-directory isolation after boot.
+
+    allow_external: the person agreed to split hard links shared with files
+    outside the folder. The quarantined original then still shares those
+    inodes with the outside names; that exposes nothing new (they are the
+    person's own files) and Undo's change check refuses if one was edited."""
     groups={}
     def unreadable(exc):raise Failure('cannot inspect quarantine source') from exc
     for root,dirs,files in os.walk(path,followlinks=False,onerror=unreadable):
@@ -24,7 +29,7 @@ def closed_hardlinks(path):
                 expected,count=groups.get(key,(s.st_nlink,0))
                 if expected!=s.st_nlink:raise Failure('hardlink group changed during quarantine inspection')
                 groups[key]=(expected,count+1)
-    if any(expected!=count for expected,count in groups.values()):raise Failure('external hardlink defeats private quarantine')
+    if not allow_external and any(expected!=count for expected,count in groups.values()):raise Failure('external hardlink defeats private quarantine')
 
 
 def private_store_fd(fd):
@@ -66,7 +71,7 @@ def prepare_store(source_fd,filesystem_root,move_id):
     return {'path':str(root/'.drives-quarantine'/move_id),'identity':saved}
 
 
-def move_original(source,expected,store):
+def move_original(source,expected,store,allow_external=False):
     """Rename without replacement; caller journals intent and maintains exclusion."""
     if os.geteuid()!=0:raise Failure('quarantine requires root')
     source=safe_path(str(source));private_directory(store['path'])
@@ -76,7 +81,7 @@ def move_original(source,expected,store):
         if current[1:]!=expected[1:]:raise Failure('source identity changed before quarantine')
         if saved!=store['identity']:raise Failure('quarantine identity changed')
         if current[0]!=saved[0] or current[2]!=saved[2]:raise Failure('quarantine filesystem changed')
-        closed_hardlinks('/proc/self/fd/'+str(sourcefd))
+        closed_hardlinks('/proc/self/fd/'+str(sourcefd),allow_external)
         entry=os.stat(name,dir_fd=parent,follow_symlinks=False)
         if (entry.st_dev,entry.st_ino)!=(current[0],current[1]):raise Failure('source entry changed before quarantine')
         rename=ctypes.CDLL(None,use_errno=True).renameat2

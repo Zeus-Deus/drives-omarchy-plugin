@@ -387,9 +387,11 @@ BarWidget {
     function showMoveReview() {
         if (!assessmentCurrent(assessment) || assessment.state !== "review" || !canWrite || confirm.opened) return;
         var a = assessment, src = a.source, dest = a.destMount, prepare = a.result.needsPreparation;
+        // The review names shared files; confirming it is the consent to split them.
+        var split = !!(a.result.stats && a.result.stats.shared && a.result.stats.shared.files > 0);
         ask(Model.moveReview(a.result), function() {
             if (!assessmentCurrent(a) || assessment !== a || !canWrite) return;
-            var req = {op: "schedule_move", src: src, destMount: dest, prepareDestination: prepare};
+            var req = {op: "schedule_move", src: src, destMount: dest, prepareDestination: prepare, splitShared: split};
             scheduledRequest = req;
             invalidateAssessment();
             scheduledEpoch = assessmentEpoch;

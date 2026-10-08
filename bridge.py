@@ -10,7 +10,7 @@ def handle(req):
         result=snapshot();result.update(ok=True,helperAvailable=False,seamlessMoves=False,moves=[],drives=[],jobs=[])
         try:
             from helper.client import status
-            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','seamlessMoves','testFixtureMode','restartPending','health')});result['helperAvailable']=h.get('ok',False)
+            h=status();result.update({k:v for k,v in h.items() if k in ('moves','drives','jobs','version','seamlessMoves','sharedLinks','testFixtureMode','restartPending','health')});result['helperAvailable']=h.get('ok',False)
         except Exception:result['helperError']='Storage helper is not installed or unavailable. The overview remains read-only.'
         result['agentAvailable']=pathlib.Path(__file__).with_name('helper').joinpath('agent.py').exists()
         import shutil
@@ -20,11 +20,12 @@ def handle(req):
         return result
     if op=='probe':return {'ok':True,**probe(req.get('path',''))}
     if op in ('assess_move','schedule_move'):
-        keys=('src','destMount')+(('prepareDestination',) if op=='schedule_move' else ())
-        if set(req)!={'op',*keys} or any(not isinstance(req[k],str) for k in ('src','destMount')) or (op=='schedule_move' and type(req['prepareDestination']) is not bool):raise Failure('invalid operation fields')
+        keys=('src','destMount')+(('prepareDestination','splitShared') if op=='schedule_move' else ())
+        if set(req)!={'op',*keys} or any(not isinstance(req[k],str) for k in ('src','destMount')) or (op=='schedule_move' and any(type(req[k]) is not bool for k in keys[2:])):raise Failure('invalid operation fields')
         from helper.client import call,status
         h=status()
         if not h.get('ok') or h.get('seamlessMoves') is not True:raise Failure('Update the storage helper and rerun helper/install.sh to use assessed folder moves; no older multi-action fallback is used.')
+        if op=='schedule_move' and h.get('sharedLinks') is not True:raise Failure('Update the storage helper: run sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh, then try again.')
         return call('AssessMove' if op=='assess_move' else 'ScheduleMove',tuple(req[k] for k in keys))
     methods={'start_move':('StartMove',('src','destMount')),'resume_drive':('ResumeDrive',('id',)),'reconnect_drive':('ReconnectDrive',('id',)),'prepare_drive':('PrepareDrive',('mountpoint',)),'resume_move':('ResumeMove',('id',)),
         'rollback_move':('RollbackMove',('id',)),'move_back':('MoveBack',('id',)),'delete_old_copy':('DeleteOldCopy',('id',)),

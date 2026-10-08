@@ -493,3 +493,32 @@ def test_source_folder_owned_by_another_user_is_accepted(home,monkeypatch):
         return s
     monkeypatch.setattr(pathlib.Path,'stat',foreign)
     assert moves.protected(str(source),CALLER)==CALLER
+
+
+def test_assessment_reports_shared_files_instead_of_refusing(home,tmp_path):
+    source=folder(home,'.t3');(source/'cache.js').write_bytes(b'x'*100);(source/'own').write_bytes(b'y')
+    os.link(source/'cache.js',home/'pnpm-store-cache.js')
+    stats=moves.tree_stats(str(source),CALLER,allow_shared=True)
+    assert stats['shared']['files']==1
+    assert stats['shared']['bytes']==100 and stats['files']==2
+    with pytest.raises(Failure,match='hard links'):moves.tree_stats(str(source),CALLER)
+
+
+def test_copy_with_split_links_still_verifies(home,tmp_path):
+    import subprocess
+    source=folder(home,'.t3');(source/'a').write_bytes(b'shared');os.link(source/'a',home/'outside')
+    (source/'b').write_bytes(b'inner');os.link(source/'b',source/'b2')
+    dest=tmp_path/'dest';subprocess.run(['rsync','-aHAXS','--numeric-ids','--delete','--',str(source)+'/',str(dest)+'/'],check=True)
+    result=moves.MoveManager(Common(tmp_path/'state')).verify(str(source),str(dest))
+    assert result['files']==3 and 'shared' not in result
+    assert os.stat(dest/'b').st_nlink==2, 'links inside the folder stay linked'
+    assert os.stat(dest/'a').st_nlink==1 and (dest/'a').read_bytes()==b'shared'
+
+
+def test_schedule_needs_explicit_consent_for_shared_files(scheduling):
+    a=scheduling;a.state['secure']=True
+    os.link(pathlib.Path(a.src)/next(p.name for p in pathlib.Path(a.src).iterdir() if p.is_file()),pathlib.Path(a.src).parent/'outside-link')
+    with pytest.raises(Failure,match='hard links'):a.m.schedule_move(a.src,a.dest,False)
+    assert a.c.records('moves')==[] and a.calls==[]
+    result=a.m.schedule_move(a.src,a.dest,False,True)
+    assert result['state']=='restart-required' and a.c.read('moves',result['id'])['splitShared'] is True

@@ -102,7 +102,7 @@ test('read-only safety assessment precedes Cancel-default review and one schedul
     assert.ok(c.confirm.message.length<420,'review stays short enough to fit the panel');
     assert.match(c.confirm.message, /for good/i,'the one-way ownership change is still disclosed');
     c.confirmationAction();
-    assert.deepEqual(plain(c.requests[1]), {op:'schedule_move',src:'/home/u/.config',destMount:'/data',prepareDestination:true});
+    assert.deepEqual(plain(c.requests[1]), {op:'schedule_move',src:'/home/u/.config',destMount:'/data',prepareDestination:true,splitShared:false});
     assert.equal(c.requests.length, 2, 'no separate PrepareDrive or ResumeMove');
 });
 const resultJob = (prep=false, overrides={}) => ({id:'assessment-1',method:'AssessMove',state:'done',result:{ok:true,source:'/home/u/.config',destMount:'/data',needsPreparation:prep,stats:{bytes:2048,files:7},...overrides}});
@@ -411,4 +411,12 @@ test('a drive set up by hand also lists folders Drives moved onto it',()=>{
     const move={id:'m',source:'/home/u/.big',destMount:'/data',state:'rebooted',bound:true,verification:{bytes:5e9}};
     const row=c.dataDrives({disks:[disk],drives:[],moves:[move],mounts:[]})[0];
     assert.equal(row.folders.length,1);assert.equal(row.folders[0].source,'/home/u/.big');
+});
+test('review names files shared through hard links and confirming it consents to splitting them',()=>{
+    const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');let c={};vm.createContext(c);vm.runInContext(fs.readFileSync(path.join(__dirname,'../Model.js'),'utf8'),c);
+    const text=c.moveReview({source:'/home/u/.t3',destMount:'/data',stats:{bytes:5e9,files:900,shared:{files:5513,bytes:2147483648}},inUse:[],needsPreparation:false});
+    assert.match(text,/5,513 files here are also linked from outside this folder/);assert.match(text,/about 2 G less/);
+    assert.doesNotMatch(c.moveReview({source:'/home/u/x',destMount:'/data',stats:{bytes:1,files:1},inUse:[]}),/linked from outside/);
+    const panel=fs.readFileSync(path.join(__dirname,'../Panel.qml'),'utf8');
+    assert.match(panel,/splitShared: split/);
 });

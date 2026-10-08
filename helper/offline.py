@@ -255,7 +255,8 @@ class Offline:
         self.admitted(j,'continue')
         if any(r['target']==j['source'] or r['target'].startswith(j['source']+'/') for r in mount_rows()):raise Failure('nested or existing mount blocks the move')
         SCREEN.step('check')
-        stats=tree_stats(j['source'],j['uid'],progress=SCREEN.counted);closed_hardlinks(j['source'])
+        split=j.get('splitShared') is True
+        stats=tree_stats(j['source'],j['uid'],progress=SCREEN.counted,allow_shared=split);closed_hardlinks(j['source'],split)
         SCREEN.totals(files=stats['files'],total_bytes=stats['bytes'],entries=getattr(getattr(SCREEN,'state',None),'counted',0))
         v=os.statvfs(j['destMount'])
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
@@ -266,7 +267,7 @@ class Offline:
                 store=prepare_store(fd,j['sourceMount'],j['id'])
             j['quarantine']=store;j['backup']=store['path']+'/original';self.c.journal('moves',j['id'],j)
             qa_crash('quarantine-prepared')
-            moved=move_original(j['source'],j['sourceIdentity'],store)
+            moved=move_original(j['source'],j['sourceIdentity'],store,split)
             original=moved['path']
             # 2. Copy the frozen original.
             self.stage(j,'copying');SCREEN.step('copy',total_bytes=stats['bytes']);say('copying '+str(stats['files'])+' files')

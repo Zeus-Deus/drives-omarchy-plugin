@@ -523,6 +523,7 @@ function moveReview(result) {
         "The old copy stays until you delete it in Drives, so Undo works."];
     if(busy)lines.push(busy);
     if(result.needsPreparation===true)lines.push("First move to "+dest+": its top folder becomes system-owned for good. Your files stay yours.");
+    if(stats.shared&&stats.shared.files>0)lines.push("Heads up: "+stats.shared.files.toLocaleString()+" files here are also linked from outside this folder (hard links, usually a package or build cache). After the move they become separate copies. Nothing is lost; the OS disk just frees about "+compact(stats.shared.bytes||0)+" less.");
     return lines.join("\n\n");
 }
 // What the move detail screen lists as proof (mock F).

@@ -42,7 +42,7 @@ def dispatch(server,method,args,sender=':1.23'):
 
 def test_protocol_signatures_and_reused_single_move_authorization():
     assert service.SIGNATURES.get('AssessMove')=='ss'
-    assert service.SIGNATURES.get('ScheduleMove')=='ssb'
+    assert service.SIGNATURES.get('ScheduleMove')=='ssbb'
     assert 'AssessMove' not in service.ACTIONS
     assert service.ACTIONS.get('ScheduleMove')=='move'
     assert 'name="AssessMove"' in service.XML and 'name="ScheduleMove"' in service.XML
@@ -106,12 +106,18 @@ def test_status_exports_capability(server,monkeypatch):
     monkeypatch.setattr(moves.MoveManager,'inspect',lambda m:[])
     assert server.status()['seamlessMoves'] is True
 
-@pytest.mark.parametrize('op,method,extra',[('assess_move','AssessMove',{}),('schedule_move','ScheduleMove',{'prepareDestination':True})])
+@pytest.mark.parametrize('op,method,extra',[('assess_move','AssessMove',{}),('schedule_move','ScheduleMove',{'prepareDestination':True,'splitShared':False})])
 def test_bridge_exact_new_operations(op,method,extra,monkeypatch):
-    calls=[];monkeypatch.setattr(client,'status',lambda:{'ok':True,'seamlessMoves':True})
+    calls=[];monkeypatch.setattr(client,'status',lambda:{'ok':True,'seamlessMoves':True,'sharedLinks':True})
     monkeypatch.setattr(client,'call',lambda method,args:calls.append((method,args)) or {'ok':True,'jobId':'a'*32})
     assert bridge.handle({'op':op,'src':'/source','destMount':'/dest',**extra})['jobId']=='a'*32
-    assert calls==[(method,('/source','/dest',True) if extra else ('/source','/dest'))]
+    assert calls==[(method,('/source','/dest',True,False) if extra else ('/source','/dest'))]
+
+
+def test_schedule_with_an_old_helper_asks_for_the_update(monkeypatch):
+    monkeypatch.setattr(client,'status',lambda:{'ok':True,'seamlessMoves':True})
+    monkeypatch.setattr(client,'call',lambda *a:pytest.fail('old helper must not be called with the new signature'))
+    with pytest.raises(Failure,match='Update the storage helper'):bridge.handle({'op':'schedule_move','src':'/s','destMount':'/d','prepareDestination':False,'splitShared':False})
 
 @pytest.mark.parametrize('value',[None,1,'true',False])
 def test_old_helper_requires_explicit_update_without_legacy_fallback(monkeypatch,value):

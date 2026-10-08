@@ -50,3 +50,11 @@ def test_filesystem_root_rejected_before_store_creation():
         with pytest.raises(Failure,match='filesystem root cannot'):
             q.prepare_store(fd,'/','b'*32)
     finally:os.close(fd)
+
+
+def test_external_hardlink_allowed_only_with_consent(tmp_path):
+    q=implementation()
+    import os
+    source=tmp_path/'src';source.mkdir();(source/'f').write_bytes(b'x');os.link(source/'f',tmp_path/'outside')
+    with pytest.raises(Failure,match='external hardlink'):q.closed_hardlinks(source)
+    q.closed_hardlinks(source,allow_external=True)

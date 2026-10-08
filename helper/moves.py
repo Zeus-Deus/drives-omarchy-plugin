@@ -178,7 +178,7 @@ def process_unit(proc):
 def _shown(path):
     return os.fsdecode(path).encode('utf-8','replace').decode('utf-8')[:160]
 
-def tree_stats(path,uid=None,progress=None):
+def tree_stats(path,uid=None,progress=None,allow_shared=False):
     # The copy runs as root (rsync -aHAXS --numeric-ids), like `sudo` in a
     # terminal: files owned by other users, files the caller cannot read, and
     # FIFOs, sockets and device nodes are all copied exactly with their owner
@@ -202,16 +202,27 @@ def tree_stats(path,uid=None,progress=None):
             # in the maintenance boot and rsync -a recreates each exactly.
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
             if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:
-                links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0,p])[1]+=1
+                links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0,p,s.st_size if stat.S_ISREG(s.st_mode) else 0])[1]+=1
             h.update(len(rel).to_bytes(4,'big'));h.update(rel);h.update(str((s.st_mode,s.st_uid,s.st_gid,s.st_size)).encode())
             seen+=1
             if progress and seen%5000==0:progress(seen)
     if progress:progress(seen)
-    # A hardlink to a file outside the folder would silently become two
-    # separate files after the move; refuse instead of splitting it.
-    split=[name for total,inside,name in links.values() if inside<total]
-    if split:raise Failure(str(len(split))+' file(s) here also have a name outside this folder (hard links), e.g. '+_shown(split[0])+'. Moving would split each into two separate copies')
-    return {'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
+    # A hardlink to a file outside the folder becomes two separate files after
+    # the move (one name per disk). Nothing is lost, but it changes how the
+    # files behave, so it is only allowed with the person's explicit consent
+    # (the review names it); otherwise it is refused.
+    split=[(name,nbytes) for total,inside,name,nbytes in links.values() if inside<total]
+    result={'files':count,'bytes':size,'directories':directories,'metadataDigest':h.hexdigest()}
+    if split:
+        if not allow_shared:raise Failure(str(len(split))+' file(s) here also have a name outside this folder (hard links), e.g. '+_shown(split[0][0])+'. Moving would split each into two separate copies')
+        result['shared']={'files':len(split),'bytes':sum(b for _,b in split),'example':_shown(split[0][0])}
+    return result
+
+
+def same_tree(a,b):
+    """Copy equals original; 'shared' only describes links outside the tree."""
+    strip=lambda s:{k:v for k,v in s.items() if k!='shared'}
+    return strip(a)==strip(b)
 
 WAITING_TEXT='another folder is already waiting for the next restart; one folder moves per restart, so restart first and then move this one'
 INSPECT_TEXT='maintenance controls require inspection before normal storage operations'
@@ -311,7 +322,7 @@ class MoveManager:
             if not allow_preparation:raise Failure('destination mount must be root-owned and not group/world writable; explicit preparation consent is required')
             if t.st_uid not in (0,uid):raise Failure('destination mount is not owned by the caller or root')
         if destMount==src or destMount.startswith(src+'/') or src.startswith(destMount+'/'):raise Failure('source and destination overlap')
-        stats=tree_stats(src,uid,self.progress);v=os.statvfs(target)
+        stats=tree_stats(src,uid,self.progress,allow_shared=True);v=os.statvfs(target)
         if v.f_bavail*v.f_frsize*5<stats['bytes']*6:raise Failure('destination needs at least 1.2x source apparent size free')
         if identity(src)!=source_id or identity(str(source.parent))!=parent_id or identity(destMount)!=mount_id:raise Failure('source or destination directory changed during assessment')
         identities={'sourceIdentity':source_id,'parentIdentity':parent_id,'mountIdentity':mount_id,
@@ -320,6 +331,7 @@ class MoveManager:
         return stats,topology,uid,needs,identities
     def preflight(self,src,destMount):
         stats,topology,uid,_,_=self._preflight(src,destMount)
+        if stats.get('shared'):raise Failure(str(stats['shared']['files'])+' file(s) here also have a name outside this folder (hard links); review the move in the panel to allow splitting them')
         return stats,topology,uid
     def conflicts(self,src,exclude=None):
         if os.path.lexists(src+'.pre-move'):raise Failure('old-copy path already exists')
@@ -386,12 +398,14 @@ class MoveManager:
         t=facts['topology']
         if t['chain'][-1]['uuid']!=j['destUUID'] or t['disk'].get('serial')!=j['diskSerial'] or os.path.normpath(t['mount']['fsroot'].rstrip('/')+'/'+os.path.relpath(j['dest'],j['destMount']))!=j['destFSRoot']:
             raise Failure('destination topology changed during scheduling; inspect the plan')
-    def schedule_move(self,src,destMount,prepareDestination):
-        if type(prepareDestination) is not bool:raise Failure('preparation consent must be a boolean')
+    def schedule_move(self,src,destMount,prepareDestination,splitShared=False):
+        if type(prepareDestination) is not bool or type(splitShared) is not bool:raise Failure('consent must be a boolean')
         self.wake(destMount)
         facts=self.admit(src,destMount,allow_preparation=True)
         if facts['needsPreparation'] and not prepareDestination:raise Failure('explicit consent is required for permanent destination mount-root preparation')
+        if facts['stats'].get('shared') and not splitShared:raise Failure(str(facts['stats']['shared']['files'])+' file(s) here also have a name outside this folder (hard links); confirm the review that splits them into separate copies')
         j=self.new_plan(src,destMount,facts)
+        if splitShared:j['splitShared']=True
         j['preparation']={'required':facts['needsPreparation'],'attempted':False,'completed':False}
         # Save a recoverable identity/intent before a possibly permanent change.
         self.stage(j,'planned')
@@ -519,14 +533,14 @@ class MoveManager:
     def verify(self,src,dest,screen=None):
         difference=run(['rsync','-aHAXS','--numeric-ids','--checksum','--dry-run','--itemize-changes','--delete','--',src+'/',dest+'/'],timeout=3600)
         if difference:raise Failure('checksum or metadata comparison differs; original is still kept')
-        if screen is None:a=tree_stats(src);b=tree_stats(dest)
+        if screen is None:a=tree_stats(src,allow_shared=True);b=tree_stats(dest,allow_shared=True)
         else:
             # Boot screen: the second walk counts on from the first.
             first=[0];screen.step('compare',count_total=2*screen.state.entries)
             def one(n):first[0]=n;screen.counted(n)
-            a=tree_stats(src,progress=one);b=tree_stats(dest,progress=lambda n:screen.counted(first[0]+n))
-        if a!=b:raise Failure('file count, bytes or metadata differ')
-        return a
+            a=tree_stats(src,progress=one,allow_shared=True);b=tree_stats(dest,progress=lambda n:screen.counted(first[0]+n),allow_shared=True)
+        if not same_tree(a,b):raise Failure('file count, bytes or metadata differ')
+        a.pop('shared',None);return a
     def bound(self,j,block=None,rows=None):
         try:
             rows=mount_rows() if rows is None else rows
