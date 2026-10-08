@@ -44,8 +44,9 @@ def size(n):
 
 
 def duration(s):
-    s=int(max(0,s))
+    s=int(math.ceil(max(0,s)))
     if s<60:return str(max(1,s))+' s'
+    if s<600:return str(s//60)+' min '+str(s%60//10*10)+' s' if s%60>=10 else str(s//60)+' min'
     if s<3600:return str(round(s/60))+' min'
     return str(s//3600)+' h '+str((s%3600)//60)+' min'
 
@@ -231,7 +232,7 @@ class Screen:
         if s.outcome=='ok':return s.message or 'Every file matched. Restarting into your desktop.'
         if s.step in ('copy','verify') and (s.total_bytes or s.handled):
             done='Copied ' if s.step=='copy' else 'Checked '
-            out=done+size(s.handled)+(' of '+size(s.total_bytes) if s.total_bytes else ' so far')
+            out=done+size(s.handled)+(' of '+size(s.total_bytes)+' ('+str(math.floor(100*s.handled/s.total_bytes))+'%)' if s.total_bytes else ' so far')
             if s.rate>0:out+='  \u00b7  '+size(s.rate)+'/s'
             if s.left is not None and s.handled>0:out+='  \u00b7  about '+duration(s.left)+' left'
             return out

@@ -8,6 +8,11 @@ A bar widget and panel for your disks on Omarchy Quattro.
   `~/Videos` as before; the files just live on the other drive.
 - Find out what fills your OS disk, and move it from there.
 
+![The restart that moves a folder: Omarchy logo with live progress](docs/media/drives-boot-screen.gif)
+
+*The restart that moves a folder. Recorded from the real screen code during a
+real copy and check; every number is measured, not animated.*
+
 ## Install
 
 One line:
