@@ -56,11 +56,18 @@ class Server:
             for m in moves:
                 if m.get('updated',0)>=running['started'] and m.get('interruptedState') in ACTIVE:
                     m['state']=m['interruptedState'];m['error']=''
+        for m in moves:
+            if m.get('state')!='cleaning':continue
+            saved=m.get('cleanup') or {};m['cleanupRunning']=bool(running and running['method']=='DeleteOldCopy')
+            live=(running or {}).get('progress') or {} if m['cleanupRunning'] else {}
+            total=int(live.get('total') or saved.get('total') or 0);done=max(int(live.get('entries') or 0),int(saved.get('deleted') or 0))
+            m['cleanupProgress']={'deleted':min(done,total) if total else done,'total':total}
         return {'ok':True,'version':'0.2.0','seamlessMoves':True,'moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
-    def schedule(self,method,args,uid,secret=None):
+    def schedule(self,method,args,uid,secret=None,automatic=False):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
         job={'id':uuid.uuid4().hex,'method':method,'state':'running','started':time.time()}
+        if automatic:job['automatic']=True
         lease=None;leased=False
         def release():
             try:
@@ -89,7 +96,7 @@ class Server:
             worker_started.set()
             try:
                 # Live count of entries checked, shown on the panel while it works.
-                def progress(n):job['progress']={'entries':int(n),'at':time.time()}
+                def progress(n,total=None):job['progress']=dict({'entries':int(n),'at':time.time()},**({'total':int(total)} if total else {}))
                 manager=MoveManager(self.c,uid=uid if method in ('AssessMove','ScheduleMove') else (None if uid==0 else uid),isolated=True,progress=progress)
                 if method=='ProvisionDrive':
                     from helper.provisioning import provision
@@ -135,6 +142,24 @@ class Server:
                 finally:release()
             raise
         return {'ok':True,'jobId':job['id']}
+    def resume_cleanups(self,attempts=20,delay=30,poll=1.0):
+        """Finish an old-copy deletion that a restart interrupted.
+
+        The administrator already authorized deleting that copy; delete_old
+        re-checks verification, the active bind and the copy's identity before
+        touching anything, so resuming never widens what may be removed. Early
+        in boot the drive or bind may not be ready yet, so retry for a while.
+        """
+        for _ in range(attempts):
+            try:pending=[j['id'] for j in self.c.records('moves') if j.get('state')=='cleaning']
+            except Failure:pending=[]
+            if not pending:return True
+            for move_id in pending:
+                try:job_id=self.schedule('DeleteOldCopy',(move_id,),0,automatic=True)['jobId']
+                except Failure:break # Busy, armed restart or draining: try later.
+                while next((j['state'] for j in self.jobs if j['id']==job_id),'done')=='running':time.sleep(poll)
+            time.sleep(delay)
+        return False
     def dispatch(self,connection,sender,object_path,interface,method,parameters,invocation):
         from gi.repository import GLib
         try:
@@ -168,6 +193,7 @@ class Server:
         node=Gio.DBusNodeInfo.new_for_xml(XML)
         self.connection.register_object(OBJECT,node.interfaces[0],self.dispatch,None,None)
         name=Gio.bus_own_name_on_connection(self.connection,BUS,Gio.BusNameOwnerFlags.NONE,None,None)
+        threading.Thread(target=self.resume_cleanups,daemon=True).start()
         GLib.MainLoop().run()
 
 if __name__=='__main__':

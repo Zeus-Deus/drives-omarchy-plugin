@@ -355,6 +355,8 @@ BarWidget {
         }
         if (result.ok && result.jobId) {
             watchJob = result.jobId;
+            // Deleting an old copy shows its live progress on the folder itself.
+            if (req && req.op === "delete_old_copy" && ownsInteraction) return openMove(req.id);
             if (ownsInteraction && (req !== scheduledRequest || scheduledEpoch === assessmentEpoch)) go("progress");
         }
     }
@@ -1384,6 +1386,50 @@ BarWidget {
 
                         Note { text: parent.words[1]; color: root.ink; font.pixelSize: Style.font.body }
                         Note { visible: text !== ""; text: root.chosenMove ? Model.moveFacts(root.chosenMove, root.storage) : "" }
+                        // Deleting the old copy: live count and a real progress bar.
+                        Column {
+                            id: cleanupBox
+                            readonly property bool active: root.chosenMove !== null && Model.moveStage(root.chosenMove, root.pendingRestart) === "cleaning"
+                            readonly property var p: active ? Model.cleanupProgress(root.chosenMove) : ({fraction: 0, running: false})
+                            visible: active
+                            width: content.width
+                            spacing: Style.space(6)
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(8)
+                                Text {
+                                    id: cleanupSpinner
+                                    text: "󰑓"
+                                    color: Commons.Color.accent
+                                    font.family: root.face
+                                    font.pixelSize: Style.font.body
+                                    textFormat: Text.PlainText
+                                    RotationAnimator on rotation { from: 0; to: 360; duration: 1100; loops: Animation.Infinite; running: cleanupBox.visible && cleanupBox.p.running }
+                                }
+                                Text {
+                                    width: parent.width - cleanupSpinner.width - Style.space(8)
+                                    text: cleanupBox.active ? Model.cleanupText(root.chosenMove) : ""
+                                    color: root.ink
+                                    wrapMode: Text.WordWrap
+                                    font.family: root.face
+                                    font.pixelSize: Style.font.bodySmall
+                                    textFormat: Text.PlainText
+                                }
+                            }
+                            Rectangle {
+                                width: parent.width
+                                height: Style.space(3)
+                                color: Util.alpha(root.ink, 0.1)
+                                radius: height / 2
+                                Rectangle {
+                                    width: parent.width * cleanupBox.p.fraction
+                                    height: parent.height
+                                    radius: height / 2
+                                    color: Commons.Color.accent
+                                    Behavior on width { NumberAnimation { duration: 400 } }
+                                }
+                            }
+                        }
                         Repeater {
                             model: parent.checks.length
                             Check {
@@ -1398,7 +1444,7 @@ BarWidget {
                             visible: root.chosenMove !== null && (root.chosenMove.state === "switched" || root.chosenMove.state === "rebooted")
                             Text {
                                 width: parent.width
-                                text: "Old copy · " + (root.chosenMove ? Model.compact((root.chosenMove.stats && root.chosenMove.stats.bytes) || 0) : "") + " on the OS disk"
+                                text: "Old copy · " + (root.chosenMove ? Model.compact(Model.movedBytes(root.chosenMove)) : "") + " on the OS disk"
                                 color: root.ink
                                 font.family: root.face
                                 font.pixelSize: Style.font.body

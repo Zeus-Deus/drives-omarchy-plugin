@@ -69,6 +69,7 @@ function moveStage(move,pending) {
     if(move.needsAttention)return "attention";
     var s=move.state, was=move.interruptedState;
     if(s==="awaiting-maintenance"||(s==="paused"&&was==="awaiting-maintenance"))return move.restoredFrom?"interrupted":"ready";
+    if(s==="cleaning"||(s==="paused"&&was==="cleaning"))return "cleaning";
     if(s==="paused"&&["quarantining","copying","verifying","switching","rolling-back"].indexOf(was)>=0)return "restore-on-restart";
     if(s==="paused")return "inspect";
     if(s==="switched")return "moved-await-reboot";
@@ -91,6 +92,7 @@ var MOVE_TEXT={
     "moved":["Moved","Files live on the drive and open through the familiar path. The old copy is kept until you delete it."],
     "undone":["Undone","The original folder is back in place."],
     "returned":["Moved back","The latest files are back on their original filesystem. The SSD copy and any previous original copy are kept."],
+    "cleaning":["Deleting old copy","Your files are safe on the drive. Only the duplicate on the OS disk is being removed. If the computer restarts first, Drives finishes it by itself afterwards."],
     "cleaned":["Moved · old copy deleted","Snapshots may still hold the old data for a while."]
 };
 function moveText(move,pending){return MOVE_TEXT[moveStage(move,pending)];}
@@ -399,6 +401,7 @@ function folderRows(snapshot) {
     return moves.map(function(m){
         var stage=moveStage(m,pending),c=idx[m.source+"\u0000"+m.destMount];
         var status=({"moved":m.bound?"● mounted":"● not reachable","moved-await-reboot":m.bound?"● mounted":"● not reachable","cleaned":m.bound?"● mounted":"● not reachable",
+            "cleaning":"deleting old copy"+(cleanupProgress(m).total?" · "+cleanupProgress(m).percent+"%":""),
             "move-on-restart":"moves on restart","undo-on-restart":"undo on restart","ready":"ready to move","interrupted":"interrupted","restore-on-restart":"interrupted",
             "attention":"needs attention","inspect":"needs inspection","undone":"undone","returned":"moved back","return-on-restart":"moves back on restart"})[stage]||stage;
         var tone=status==="● mounted"?"ok":(["● not reachable","needs attention","needs inspection","interrupted"].indexOf(status)>=0?"bad":"dim");
@@ -465,7 +468,7 @@ function waitingNote(snapshot) {
     return what+verb+" at the next restart. One folder moves per restart: restart first, then move this one.";
 }
 function moveMeta(m,pending) {
-    var stage=moveStage(m,pending),done=["moved","moved-await-reboot","cleaned"].indexOf(stage)>=0;
+    var stage=moveStage(m,pending),done=["moved","moved-await-reboot","cleaning","cleaned"].indexOf(stage)>=0;
     if(stage==="returned"||stage==="return-on-restart")return moveText(m,pending)[0]+" · back to "+display(m.sourceMount||"original filesystem");
     return moveText(m,pending)[0]+" · "+(done?"on ":"to ")+display(m.destMount);
 }
@@ -579,12 +582,36 @@ function ioText(r){return r?"Read "+rate(r.read)+" · Write "+rate(r.write):"";}
 // Sizes come from the move record (apparent bytes at move time), not a live du.
 function movedFolders(target,moves) {
     return (moves||[]).filter(function(m){return m.destMount===target&&["switched","rebooted","cleaning","cleaned"].indexOf(m.state)>=0;})
-        .map(function(m){return {source:m.source,bytes:(m.stats&&m.stats.bytes)||0,bound:!!m.bound,oldCopy:m.state!=="cleaned"};});
+        .map(function(m){return {source:m.source,bytes:movedBytes(m),bound:!!m.bound,oldCopy:m.state!=="cleaned"};});
+}
+// Size of what was moved. The switch-over verification counted the real tree;
+// stats is only the estimate from when the move was planned (often stale).
+function movedBytes(m){return (m&&m.verification&&m.verification.bytes)||(m&&m.stats&&m.stats.bytes)||0;}
+// Space the old copy still takes on the OS disk.
+function oldCopyBytes(m) {
+    if(!m||m.oldCopyAvailable===false)return 0;
+    var s=moveStage(m,null);
+    if(s==="moved"||s==="moved-await-reboot")return movedBytes(m);
+    if(s==="cleaning")return Math.round(movedBytes(m)*(1-cleanupProgress(m).fraction));
+    return 0;
 }
 // Old copies still kept on the OS disk (deleted only by an explicit step).
 function reclaimable(moves) {
-    var n=0;(moves||[]).forEach(function(m){if(m.state==="switched"||m.state==="rebooted")n+=(m.stats&&m.stats.bytes)||0;});
+    var n=0;(moves||[]).forEach(function(m){n+=oldCopyBytes(m);});
     return n;
+}
+// How far deleting an old copy got: helper-reported entries removed of total.
+function cleanupProgress(m) {
+    var p=(m&&m.cleanupProgress)||(m&&m.cleanup&&{deleted:m.cleanup.deleted,total:m.cleanup.total})||{};
+    var total=Math.max(0,p.total||0),done=Math.max(0,Math.min(p.deleted||0,total||Infinity));
+    var fraction=total?Math.min(1,done/total):0;
+    return {deleted:done,total:total,fraction:fraction,percent:Math.floor(fraction*100),running:!!(m&&m.cleanupRunning)};
+}
+function cleanupText(m) {
+    var p=cleanupProgress(m);
+    var head=p.running?"Deleting":"Waiting to continue";
+    if(!p.total)return head+"…";
+    return head+" · "+p.deleted.toLocaleString()+" of "+p.total.toLocaleString()+" items · "+p.percent+"%";
 }
 function warning(snapshot) {
     var ds=snapshot.drives||[],ms=snapshot.moves||[];

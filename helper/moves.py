@@ -78,8 +78,9 @@ def anchored_tree(path):
         if leaf is not None:os.close(leaf)
         os.close(parent)
 
-def delete_tree_fd(fd):
-    """Never resolve a deletion through an absolute user-controlled pathname."""
+def delete_tree_fd(fd,tick=None):
+    """Never resolve a deletion through an absolute user-controlled pathname.
+    tick(), when given, is called once per removed entry (progress only)."""
     device=os.fstat(fd).st_dev
     with os.scandir(fd) as entries:
         for entry in entries:
@@ -89,13 +90,21 @@ def delete_tree_fd(fd):
                 try:
                     actual=os.fstat(child)
                     if (actual.st_dev,actual.st_ino)!=(info.st_dev,info.st_ino) or actual.st_dev!=device:raise Failure('directory or filesystem changed during cleanup')
-                    delete_tree_fd(child)
+                    delete_tree_fd(child,tick)
                     now=os.stat(entry.name,dir_fd=fd,follow_symlinks=False)
                     if (now.st_dev,now.st_ino)!=(actual.st_dev,actual.st_ino):raise Failure('directory changed during cleanup')
                     os.rmdir(entry.name,dir_fd=fd)
                 finally:os.close(child)
             else:os.unlink(entry.name,dir_fd=fd)
+            if tick:tick()
     os.fsync(fd)
+
+
+def cleanup_total(j):
+    """Entries in the frozen original: the switch-over verification counted
+    exactly that tree, so no second walk is needed before deleting it."""
+    v=j.get('verification') or j.get('stats') or {}
+    return max(1,int(v.get('files',0) or 0)+int(v.get('directories',0) or 0))
 
 def protected(path,uid=None):
     """Only a real directory strictly inside the actual caller's home.
@@ -669,7 +678,17 @@ class MoveManager:
                 self.changed(j['backup'],j['sourceIdentity'],j.get('sourceUUID'))
                 held=os.fstat(leaf)
                 if identity_fd(leaf)!=identity(j['backup']):raise Failure('old-copy directory changed during cleanup')
-                self.stage(j,'cleaning');delete_tree_fd(leaf)
+                # Resuming after a restart continues the saved count.
+                total=cleanup_total(j);done=[int((j.get('cleanup') or {}).get('deleted',0) or 0)];saved=[time.monotonic()]
+                j['cleanup']={'total':total,'deleted':min(done[0],total)}
+                self.stage(j,'cleaning')
+                def tick():
+                    done[0]+=1
+                    if done[0]%500:return
+                    if self.progress:self.progress(done[0],total)
+                    if time.monotonic()-saved[0]>=5:
+                        saved[0]=time.monotonic();j['cleanup']['deleted']=min(done[0],total);self.c.journal('moves',j['id'],j)
+                delete_tree_fd(leaf,tick)
                 now=os.stat(name,dir_fd=parent,follow_symlinks=False)
                 if (now.st_dev,now.st_ino)!=(held.st_dev,held.st_ino):raise Failure('old-copy name changed during cleanup')
                 os.rmdir(name,dir_fd=parent);os.fsync(parent)
@@ -761,12 +780,15 @@ class MoveManager:
             live=dict(j);live['bound']=self.bound(j,block,rows) if self.recorded_destination(j) else False
             live['originalAvailable']=os.path.lexists(j['source']) and not os.path.lexists(j['backup'])
             live['oldCopyAvailable']=os.path.lexists(j['backup'])
-            if j['state'] in ACTIVE:
+            # An interrupted old-copy deletion is not a fault: the helper
+            # finishes it on its own (Server.resume_cleanups).
+            if j['state'] in ACTIVE and j['state']!='cleaning':
                 live['interruptedState']=j['state'];live['state']='paused';live['error']='Interrupted; inspect before Continue or Undo.'
                 if j['state'] in RETURN_STATES:live['error']=j.get('error') or 'Move back interrupted; inspect before retrying Move back. All copies are retained.'
             if j['state']=='switched' and j.get('verified') and j.get('boot_id')!=self.c.boot_id() and live['bound']:
                 live['state']='rebooted'
-            live['canDelete']=live['state'] in ('rebooted','cleaning') and live['bound'] and j.get('verified',False) and j.get('maintenanceProtocol')==2
+            if j['state']=='cleaning':live['error']='' # The helper finishes it; not a fault.
+            live['canDelete']=(live['state']=='rebooted' or j['state']=='cleaning') and live['bound'] and j.get('verified',False) and j.get('maintenanceProtocol')==2
             live['canCancelIncomplete']=False
             live['canMoveBack']=False
             if j.get('state') in {'switched','cleaned'}|RETURN_STATES:
