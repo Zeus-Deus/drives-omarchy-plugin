@@ -21,6 +21,7 @@ Item {
     signal launching()
     property int requestEpoch: 0
     property bool timedOut: false
+    property var finishedRequest: null
     signal finished(var result, var req)
 
     function refresh() { if (opened && !busy) submit({op:"status"}); }
@@ -60,6 +61,9 @@ Item {
             } else {
                 // An obsolete assessment must not leak an error into another view.
                 if (req.op !== "assess_move") error=result.ok ? "" : Model.display(result.error);
+                // Qt 6.12 copies a JS object passed through a var signal argument,
+                // so listeners compare identity against this property instead.
+                finishedRequest = req;
                 finished(result, req);
             }
         }

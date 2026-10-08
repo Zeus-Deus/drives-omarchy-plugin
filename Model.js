@@ -329,7 +329,7 @@ function dataDrives(snapshot) {
     });
     disks.forEach(function(x){
         if(used[x.id]||x.system||!x.encrypted||!(x.mounts||[]).length)return;
-        var u=_usage(x,""),folders=manualBinds(snapshot,x);
+        var u=_usage(x,""),folders=(u?movedFolders(u.target,moves):[]).concat(manualBinds(snapshot,x));
         var segs=[];if(u&&u.total>0)folders.forEach(function(f,i){if(f.bytes>0)segs.push({color:i%4,fraction:Math.min(1,f.bytes/u.total)});});
         var other=u&&u.total>0?Math.max(0,u.used/u.total-segs.reduce(function(a,s){return a+s.fraction;},0)):0;
         // Opened at boot from a keyfile in crypttab = the same thing Drives sets up.

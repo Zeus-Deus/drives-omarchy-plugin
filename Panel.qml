@@ -47,7 +47,8 @@ BarWidget {
         for (var i = jobs.length - 1; i >= 0; i--) if (jobs[i].id === assessment.jobId) return jobs[i];
         return null;
     }
-    onAssessmentJobChanged: handleAssessment(assessmentJob)
+    // Deferred: handleAssessment rewrites assessment, which assessmentJob reads.
+    onAssessmentJobChanged: Qt.callLater(function() { root.handleAssessment(root.assessmentJob); })
 
     readonly property bool opened: controller.open
     readonly property bool popoutSwitchClosing: controller.popoutSwitchClosing
@@ -82,6 +83,8 @@ BarWidget {
     }
     readonly property var cd: chosenDrive || ({})
     readonly property bool cdConfigured: chosenDrive !== null && chosenDrive.drive !== null
+    // Mountpoint of the open drive, also for drives set up by hand.
+    readonly property string cdMount: chosenDrive ? (chosenDrive.drive ? chosenDrive.drive.mountpoint : (chosenDrive.usage ? chosenDrive.usage.target : "")) : ""
     readonly property var chosenDisk: {
         for (var i = 0; i < disks.length; i++) if (disks[i].id === selectedDiskId) return disks[i];
         return null;
@@ -119,7 +122,7 @@ BarWidget {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
             if (chosenDrive.health && chosenDrive.health.install) out.push({kind: "act", id: "install_smart"});
             if (chosenDrive.usage && targets.some(function(t) { return t.mountpoint === chosenDrive.usage.target; })) out.push({kind: "act", id: "move_here"});
-            folderRows.forEach(function(f) { if (cdConfigured && f.move.destMount === chosenDrive.drive.mountpoint) out.push({kind: "move", id: f.id}); });
+            folderRows.forEach(function(f) { if (cdMount !== "" && f.move.destMount === cdMount) out.push({kind: "move", id: f.id}); });
             if (cdConfigured) out.push({kind: "act", id: "export"});
         } else if (view === "add") {
             if (addStep === 1) candidates.forEach(function(c) { if (c.selectable) out.push({kind: "pick", id: c.id}); });
@@ -345,7 +348,9 @@ BarWidget {
                 jobId: "", state: "failed", error: "The helper is busy. Retry when the current step finishes."};
         }
     }
-    function handleFinished(result, req) {
+    function handleFinished(result, copy) {
+        // The signal argument is a copy on Qt 6.12; identity checks need the original.
+        var req = service.finishedRequest || copy;
         if (req && req.op === "assess_move") {
             if (!assessmentCurrent(assessment) || assessment.request !== req) return;
             var a = assessment;
@@ -1118,13 +1123,13 @@ BarWidget {
                             NavRow {
                                 required property int index
                                 readonly property var f: root.folderRows[index] || ({move: {}})
-                                visible: root.cdConfigured && f.move.destMount === root.chosenDrive.drive.mountpoint
+                                visible: root.cdMount !== "" && f.move.destMount === root.cdMount
                                 height: visible ? implicitHeight : 0
                                 navIndex: root.navIndex("move", f.id)
                                 icon: "■"
                                 iconColor: f.color >= 0 ? root.segColor(f.color) : root.dim
                                 title: f.source || ""
-                                sub: Model.compact((f.move.stats && f.move.stats.bytes) || 0)
+                                sub: "private copy on " + Model.display(f.move.destMount) + " · " + Model.compact(Model.movedBytes(f.move)) + " · moved by Drives"
                                 trail: f.status || ""
                                 trailColor: root.toneColor(f.tone)
                                 onChosen: root.openMove(f.id)
@@ -1521,7 +1526,7 @@ BarWidget {
                 contentY: flick.contentY, contentHeight: flick.contentHeight, height: flick.height,
                 confirmOpen: confirm.opened, confirmSelection: confirm.selectedIndex, confirmMessage: confirm.message,
                 snapshot: root.storage, rates: service.rates, footer: Model.footerHints(root.view).map(function(h) { return h.join(" "); }).join(" · "),
-                busy: service.busy, request: service.request.op, pending: service.pending ? service.pending.op : "", error: service.error});
+                assessment: root.assessment ? {state: root.assessment.state, error: root.assessment.error} : null, busy: service.busy, request: service.request.op, pending: service.pending ? service.pending.op : "", error: service.error});
         }
         function open(): void { root.open(); }
         function close(): void { root.close(); }

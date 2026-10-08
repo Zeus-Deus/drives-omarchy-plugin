@@ -397,3 +397,18 @@ test('a folder already waiting for the restart is named before any check runs',(
     assert.equal(m.waitingNote({restartPending:null,moves:[]}),'');
     assert.equal(m.waitingNote({restartPending:{valid:false},moves:[]}),'','an invalid request is not described as waiting');
 });
+
+test('assessment results are matched by the original request, not the Qt 6.12 signal copy',()=>{
+    const fs=require('node:fs'),path=require('node:path');
+    const panel=fs.readFileSync(path.join(__dirname,'../Panel.qml'),'utf8'),service=fs.readFileSync(path.join(__dirname,'../Service.qml'),'utf8');
+    assert.match(service,/finishedRequest = req;\s*\n\s*finished\(result, req\);/);
+    assert.match(panel,/var req = service\.finishedRequest \|\| copy;/);
+    assert.match(panel,/onAssessmentJobChanged: Qt\.callLater/);
+});
+test('a drive set up by hand also lists folders Drives moved onto it',()=>{
+    const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');let c={};vm.createContext(c);vm.runInContext(fs.readFileSync(path.join(__dirname,'../Model.js'),'utf8'),c);
+    const disk={id:'d',model:'Data SSD',encrypted:true,system:false,bootUnlock:'keyfile',mounts:[{target:'/data',source:'/dev/mapper/bulk',fsroot:'/',fstype:'btrfs'}],usage:[{target:'/data',total:4e12,used:7e11,free:3e12}]};
+    const move={id:'m',source:'/home/u/.big',destMount:'/data',state:'rebooted',bound:true,verification:{bytes:5e9}};
+    const row=c.dataDrives({disks:[disk],drives:[],moves:[move],mounts:[]})[0];
+    assert.equal(row.folders.length,1);assert.equal(row.folders[0].source,'/home/u/.big');
+});
