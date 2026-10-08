@@ -3,6 +3,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -162,14 +163,14 @@ BarWidget {
     }
 
     // ---- palette (theme tokens only) -----------------------------------------
-    readonly property color ink: bar ? bar.foreground : Color.foreground
+    readonly property color ink: bar ? bar.foreground : Commons.Color.foreground
     readonly property color dim: Qt.darker(ink, 1.4)
     readonly property string face: Style.font.family
     // Match the working PassPage list: three two-line rows per mouse notch,
     // not three short popup rows. Touchpad pixel deltas still pass through.
     readonly property real wheelStep: (Style.spacing.rowPaddingX + Style.space(38)) * 3
-    function toneColor(tone) { return tone === "ok" ? Color.accent : (tone === "bad" ? Color.urgent : dim); }
-    function segColor(i) { return Util.alpha(Color.accent, [1.0, 0.68, 0.46, 0.3][Math.max(0, i) % 4]); }
+    function toneColor(tone) { return tone === "ok" ? Commons.Color.accent : (tone === "bad" ? Commons.Color.urgent : dim); }
+    function segColor(i) { return Util.alpha(Commons.Color.accent, [1.0, 0.68, 0.46, 0.3][Math.max(0, i) % 4]); }
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -408,7 +409,7 @@ BarWidget {
         anchors.fill: parent
         bar: root.bar
         text: "󰋊" + (Model.warning(root.storage) ? " !" : (!root.vertical && root.setting("showUsage", true) && root.driveRows.length ? " " + Model.fullest(root.disks) + "%" : ""))
-        foreground: Model.warning(root.storage) ? Color.urgent : root.ink
+        foreground: Model.warning(root.storage) ? Commons.Color.urgent : root.ink
         onPressed: function(b) { if (root.opened) root.close(); else root.open(); }
     }
 
@@ -587,8 +588,8 @@ BarWidget {
         navIndex: root.navIndex("act", op)
         icon: words[0]
         title: words[1]
-        iconColor: words[2] === "bad" ? Color.urgent : root.ink
-        titleColor: words[2] === "bad" ? Color.urgent : root.ink
+        iconColor: words[2] === "bad" ? Commons.Color.urgent : root.ink
+        titleColor: words[2] === "bad" ? Commons.Color.urgent : root.ink
         enabled: op === "home" || op === "restart" || root.canWrite
         opacity: enabled ? 1 : 0.45
         onChosen: root.act(op)
@@ -636,9 +637,9 @@ BarWidget {
         default property alias body: cardBody.data
         width: content.width
         implicitHeight: cardBody.implicitHeight + Style.space(20)
-        color: urgent ? Util.alpha(Color.urgent, 0.06) : "transparent"
+        color: urgent ? Util.alpha(Commons.Color.urgent, 0.06) : "transparent"
         border.width: 1
-        border.color: urgent ? Util.alpha(Color.urgent, 0.5) : Util.alpha(root.ink, 0.16)
+        border.color: urgent ? Util.alpha(Commons.Color.urgent, 0.5) : Util.alpha(root.ink, 0.16)
         radius: Style.cornerRadius
         Column {
             id: cardBody
@@ -737,7 +738,7 @@ BarWidget {
                     Card {
                         urgent: true
                         visible: service.error !== ""
-                        Text { width: parent.width; text: service.error; color: Color.urgent; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
+                        Text { width: parent.width; text: service.error; color: Commons.Color.urgent; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
                     }
 
                     // ================= A · overview =================
@@ -759,7 +760,7 @@ BarWidget {
                                 required property int index
                                 readonly property var a: root.alertRows[index] || ({fix: {action: "", hint: ""}, folders: []})
                                 urgent: true
-                                Check { width: parent.width; glyph: "󰀦"; tint: Color.urgent; text: alertCard.a.title }
+                                Check { width: parent.width; glyph: "󰀦"; tint: Commons.Color.urgent; text: alertCard.a.title }
                                 Text { width: parent.width; text: alertCard.a.sub; color: root.dim; font.family: root.face; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
                                 Repeater {
                                     model: (alertCard.a.folders || []).length
@@ -820,7 +821,7 @@ BarWidget {
                                 readonly property var r: root.driveRows[index] || ({})
                                 navIndex: root.navIndex("drive", r.key)
                                 icon: "󰋊"
-                                iconColor: r.problem ? Color.urgent : root.ink
+                                iconColor: r.problem ? Commons.Color.urgent : root.ink
                                 title: r.title || ""
                                 pillLabel: r.pill || ""
                                 pillTone: r.tone || "dim"
@@ -951,7 +952,7 @@ BarWidget {
                             Text {
                                 id: spinner
                                 text: root.storage.sizes.done ? "󰄬" : "󰑓"
-                                color: root.storage.sizes.done ? root.dim : Color.accent
+                                color: root.storage.sizes.done ? root.dim : Commons.Color.accent
                                 font.family: root.face
                                 font.pixelSize: Style.font.body
                                 textFormat: Text.PlainText
@@ -979,7 +980,7 @@ BarWidget {
                             Rectangle {
                                 width: scanTrack.width * 0.25
                                 height: parent.height
-                                color: Color.accent
+                                color: Commons.Color.accent
                                 NumberAnimation on x { from: -scanTrack.width * 0.25; to: scanTrack.width; duration: 1400; loops: Animation.Infinite; running: scanTrack.visible && root.view === "system" }
                             }
                         }
@@ -1031,7 +1032,7 @@ BarWidget {
                                 onClicked: root.openMoveFolder(root.typed.path, root.sourceDestination)
                             }
                         }
-                        Note { visible: root.typed.why !== ""; text: root.typed.why; color: Color.urgent }
+                        Note { visible: root.typed.why !== ""; text: root.typed.why; color: Commons.Color.urgent }
 
                         SectionHead { visible: root.apps.some(function(a) { return a.movable; }); label: "APPS"; trail: "" }
                         Repeater {
@@ -1083,7 +1084,7 @@ BarWidget {
                             visible: text !== ""
                             text: [io, why].filter(function(s) { return s !== ""; }).join("\n")
                         }
-                        Note { visible: text !== ""; text: root.cd.fix ? root.cd.fix.hint : ""; color: Color.urgent }
+                        Note { visible: text !== ""; text: root.cd.fix ? root.cd.fix.hint : ""; color: Commons.Color.urgent }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "reconnect"; op: "reconnect" }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "recover"; op: "recover" }
                         ActionRow { visible: !!(root.cd.health && root.cd.health.install); op: "install_smart" }
@@ -1147,7 +1148,7 @@ BarWidget {
                             spacing: Style.space(4)
                             Repeater {
                                 model: 2
-                                Rectangle { required property int index; width: Style.space(28); height: Style.space(3); color: index < root.addStep ? Color.accent : Util.alpha(root.ink, 0.18) }
+                                Rectangle { required property int index; width: Style.space(28); height: Style.space(3); color: index < root.addStep ? Commons.Color.accent : Util.alpha(root.ink, 0.18) }
                             }
                         }
                         // step 1 · choose the disk
@@ -1178,7 +1179,7 @@ BarWidget {
                             Check {
                                 width: parent.width
                                 glyph: "󰀦"
-                                tint: Color.urgent
+                                tint: Commons.Color.urgent
                                 text: "Everything on " + (root.chosenDisk ? Model.display(root.chosenDisk.model) + " (serial …" + Model.display(String(root.chosenDisk.serial).slice(-4)) + ")" : "") + " will be erased."
                             }
                             Text { width: parent.width; text: "To confirm, type the last 4 characters of its serial:"; color: root.dim; wrapMode: Text.WordWrap; font.family: root.face; font.pixelSize: Style.font.bodySmall; textFormat: Text.PlainText }
@@ -1199,7 +1200,7 @@ BarWidget {
                             Text {
                                 visible: serialField.text.length >= 4 && !root.serialOk
                                 text: "That doesn't match this disk's serial."
-                                color: Color.urgent
+                                color: Commons.Color.urgent
                                 font.family: root.face
                                 font.pixelSize: Style.font.bodySmall
                                 textFormat: Text.PlainText
@@ -1212,7 +1213,7 @@ BarWidget {
                             navIndex: root.navIndex("opt", "auto")
                             selectable: root.autoAllowed
                             icon: root.autoUnlock ? "◉" : "○"
-                            iconColor: root.autoUnlock ? Color.accent : root.ink
+                            iconColor: root.autoUnlock ? Commons.Color.accent : root.ink
                             title: "Unlock with Omarchy"
                             pillLabel: "recommended"
                             pillTone: "ok"
@@ -1223,7 +1224,7 @@ BarWidget {
                             visible: root.addStep === 2
                             navIndex: root.navIndex("opt", "manual")
                             icon: !root.autoUnlock ? "◉" : "○"
-                            iconColor: !root.autoUnlock ? Color.accent : root.ink
+                            iconColor: !root.autoUnlock ? Commons.Color.accent : root.ink
                             title: "Ask every time"
                             sub: "Opens only with the recovery passphrase. Folders can't be moved onto it."
                             onChosen: root.autoUnlock = false
@@ -1232,7 +1233,7 @@ BarWidget {
                             visible: root.addStep === 2
                             navIndex: root.navIndex("opt", "erase")
                             icon: root.eraseDisk ? "󰄵" : "󰄱"
-                            iconColor: root.eraseDisk ? Color.urgent : root.ink
+                            iconColor: root.eraseDisk ? Commons.Color.urgent : root.ink
                             title: "Erase existing partitions"
                             sub: "Needed if the disk was used before. Off: setup stops if anything is on it."
                             onChosen: root.eraseDisk = !root.eraseDisk
@@ -1273,7 +1274,7 @@ BarWidget {
                                 navIndex: root.navIndex("target", t.mountpoint)
                                 current: t.mountpoint === root.moveTarget
                                 icon: t.mountpoint === root.moveTarget ? "◉" : "○"
-                                iconColor: t.mountpoint === root.moveTarget ? Color.accent : root.ink
+                                iconColor: t.mountpoint === root.moveTarget ? Commons.Color.accent : root.ink
                                 title: t.title || ""
                                 sub: Model.targetSub(t)
                                 onChosen: root.chooseTarget(t.mountpoint)
@@ -1301,13 +1302,13 @@ BarWidget {
                                 required property var modelData
                                 glyph: modelData[0]
                                 text: modelData[1]
-                                tint: modelData[0] === "!" ? Color.urgent : root.ink
+                                tint: modelData[0] === "!" ? Commons.Color.urgent : root.ink
                             }
                         }
                         Note {
                             visible: root.storage.helperAvailable === true && !root.seamlessMoves
                             text: "Update the storage helper to use seamless folder moves. Run: sudo bash ~/.config/omarchy/plugins/io.github.zeus-deus.drives/helper/install.sh — then reopen Drives."
-                            color: Color.urgent
+                            color: Commons.Color.urgent
                         }
                         Row {
                             width: content.width
@@ -1316,7 +1317,7 @@ BarWidget {
                             Text {
                                 id: assessmentSpinner
                                 text: "󰑓"
-                                color: Color.accent
+                                color: Commons.Color.accent
                                 font.family: root.face
                                 font.pixelSize: Style.font.body
                                 textFormat: Text.PlainText
@@ -1342,14 +1343,14 @@ BarWidget {
                             Rectangle {
                                 width: assessTrack.width * 0.25
                                 height: parent.height
-                                color: Color.accent
+                                color: Commons.Color.accent
                                 NumberAnimation on x { from: -assessTrack.width * 0.25; to: assessTrack.width; duration: 1400; loops: Animation.Infinite; running: assessTrack.visible && root.opened }
                             }
                         }
                         Note {
                             visible: root.assessment !== null && root.assessment.state === "failed"
                             text: root.assessment ? root.assessment.error : ""
-                            color: Color.urgent
+                            color: Commons.Color.urgent
                         }
                         Note {
                             visible: service.mutating && service.request.op === "schedule_move"
@@ -1390,7 +1391,7 @@ BarWidget {
                                 readonly property var c: root.chosenMove ? (Model.moveChecks(root.chosenMove)[index] || ({})) : ({})
                                 glyph: c.ok ? "✓" : (c.pending ? "○" : "!")
                                 text: c.text || ""
-                                tint: c.ok ? root.ink : (c.pending ? root.dim : Color.urgent)
+                                tint: c.ok ? root.ink : (c.pending ? root.dim : Commons.Color.urgent)
                             }
                         }
                         Card {
@@ -1416,7 +1417,7 @@ BarWidget {
                         Note {
                             visible: root.chosenMove !== null && !!root.chosenMove.error && Model.showMoveError(root.chosenMove, root.storage)
                             text: root.chosenMove ? "Last attempt: " + Model.display(root.chosenMove.error) : ""
-                            color: root.chosenMove && root.chosenMove.needsAttention ? Color.urgent : root.dim
+                            color: root.chosenMove && root.chosenMove.needsAttention ? Commons.Color.urgent : root.dim
                         }
                         Item { width: 1; height: Style.space(2) }
                         Repeater {
@@ -1433,7 +1434,7 @@ BarWidget {
                         readonly property var j: Model.jobText(root.watchedJob)
 
                         Note { visible: parent.j.state === "running"; text: "The helper owns this step. Omarchy may ask for your password first."; color: root.ink }
-                        Note { visible: parent.j.state === "failed"; text: parent.j.error || ""; color: Color.urgent }
+                        Note { visible: parent.j.state === "failed"; text: parent.j.error || ""; color: Commons.Color.urgent }
                         Note { visible: root.jobDone && root.restartArmed; text: "Nothing has moved yet. Save your work, then restart: apps and services close cleanly, the folder moves, and they start again afterwards. This restart takes a little longer than usual."; color: root.ink }
                         ActionRow { visible: root.jobDone && root.restartArmed; op: "restart" }
                         ActionRow { op: "home" }
