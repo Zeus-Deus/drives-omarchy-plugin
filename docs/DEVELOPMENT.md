@@ -18,14 +18,14 @@ a red "VM test fixture" note.
 ## Gates
 
 ```sh
-node --test tests/*.test.cjs                                   # Model.js, Service.qml lifecycle
+env DRIVES_SHELL_VM=1 node --test tests/*.test.cjs           # in the VM: model/lifecycle and owned producer trees
 sudo env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q \
      -p no:cacheprovider --basetemp=/root/pt/<run> tests      # helper (in the VM, as root)
 omarchy plugin validate .
-/usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml
+/usr/lib/qt6/bin/qmllint -I <dir with qs -> /usr/share/omarchy/shell> -I /usr/lib/qt6/qml Panel.qml Service.qml EditField.qml PasteTransfer.qml
 ```
 
-Latest checkpoint, seamless-UX fixes (VM, 2026-10-07): **455 Python passed as
+Historical checkpoint, seamless-UX fixes (VM, 2026-10-07; not current hardening sign-off): **455 Python passed as
 root, 11 skipped; 108 Node passed**; plugin validates; qmllint warning set
 unchanged from HEAD. Installed and driven in the VM: an idle-automount `/data`
 after boot is checked and mounted on demand (old build: "Choose a mounted data
@@ -90,14 +90,19 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
    <open|status|goto|selectDisk|selectMove|moveAction|reconnect|...>`.
    `status` returns the snapshot, confirm-dialog state, rates, footer and
    bridge busy state.
-5. Reboots: from outside the guest, use the VM's own QMP `system_reset`
-   (keeps hot-plugged disks attached), or the panel's "Restart now" button. `sync` first. A move needs about 150 s for the
-   maintenance boot plus its own reboot.
+5. Restart only the owned guest, normally through its own Restart menu.
+   Record the boot ID and queued action before restarting, then verify the
+   maintenance result and return to normal startup. If an agent's safety
+   policy blocks restarting, a human must perform that step: do not substitute
+   QMP reset, another command, D-Bus or automated GUI input. QMP disk attachment
+   does not authorize lifecycle control. Never restart the host for these tests.
 6. Polkit: write actions need an admin password. For unattended GUI tests a
    VM-only `/etc/polkit-1/rules.d/00-drives-qa.rules` returning YES for
    `io.github.zeus-deus.drives.*` and the test user is acceptable. First
    record that the panel shows "administrator authorization denied" without
-   it, and remove it right after. Never ship it.
+   it, then remove it and verify removal right after. Never ship it. Such a
+   rule qualifies storage/protocol behavior only: real interactive polkit and
+   GTK secret entry need separate end-to-end acceptance without the rule.
 
 ## Traps
 
@@ -125,7 +130,11 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
   directory's mtime; the divergence check ignores timestamp-only directory
   lines, and the read/write probe restores the mtime.
 
-## Verified in the VM
+## Historical VM acceptance
+
+These receipts describe earlier installed checkpoints. They are not automatic
+acceptance of later source changes; rerun affected flows and the combined suite
+before claiming a new release is verified.
 
 | Scenario | Result |
 |---|---|
@@ -137,7 +146,7 @@ The `test_service.py` sealed-memfd test needs a Python whose `fcntl` has
 | Crash at copying, verifying, placeholder, fstab, quarantine-prepared | Original restored unchanged, move paused. |
 | Crash during Undo | Undo finished on the next boot. |
 | Undo after a new file was added | Refused; new file kept. |
-| Nested mount, outside hardlink, too little space | Refused with a clear message. Files owned by other users, unreadable to the caller, FIFOs and sockets move. Names such as `.config` or `.ssh` no longer decide admission. |
+| Nested mount, too little space | Refused with a clear message. Files owned by other users, unreadable to the caller, FIFOs and sockets move. Names such as `.config` or `.ssh` do not decide admission. External hardlinks are reported and require explicit split consent; their former blanket refusal belongs to older checkpoints. |
 | Folder in use by a background service and a running program | Named in the review, not refused; moved and undone across restarts with identical checksums; the service restarted by itself. |
 | Destination unplugged before the maintenance boot | "Drive not connected"; nothing changed; folder still usable. |
 | Drive re-plugged after boot | Reconnect from the panel brings back the drive and its moved folder; checksum identical. |

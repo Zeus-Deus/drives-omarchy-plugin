@@ -28,6 +28,17 @@ def read_secret_fd(fd):
     if b'\0' in value:raise Failure('invalid secret')
     value.decode('utf-8');return value
 
+
+class _StatusRecords:
+    """Constrain move inspection before it performs filesystem lookups."""
+    def __init__(self,common,uid):self.common=common;self.uid=uid
+    def __getattr__(self,name):return getattr(self.common,name)
+    def records(self,kind):
+        rows=self.common.records(kind)
+        if kind=='moves' and self.uid!=0:
+            return [r for r in rows if type(r.get('uid')) is int and r['uid']==self.uid]
+        return rows
+
 class Server:
     def __init__(self,common=None):
         self.c=common or Common();self.worker_lock=threading.Lock();self.draining=False;self.connection=None
@@ -48,10 +59,17 @@ class Server:
         from gi.repository import Gio,GLib
         if not isinstance(sender,str) or not sender.startswith(':'):raise Failure('unique D-Bus sender required')
         return self.connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetConnectionUnixUser',GLib.Variant('(s)',(sender,)),None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
-    def status(self):
+    def status(self,uid=None):
         from helper.provisioning import inspect
-        moves=MoveManager(self.c).inspect()
-        running=next((j for j in reversed(self.jobs) if j['state']=='running'),None)
+        # Direct root CLI inspection stays complete. D-Bus always supplies its
+        # unique sender's authenticated UID; missing legacy owners are private.
+        if uid is None:uid=os.getuid()
+        moves=MoveManager(_StatusRecords(self.c,uid)).inspect()
+        jobs=list(self.jobs)
+        if uid!=0:
+            moves=[m for m in moves if type(m.get('uid')) is int and m['uid']==uid]
+            jobs=[j for j in jobs if type(j.get('uid')) is int and j['uid']==uid]
+        running=next((j for j in reversed(jobs) if j['state']=='running'),None)
         if running:
             for m in moves:
                 if m.get('updated',0)>=running['started'] and m.get('interruptedState') in ACTIVE:
@@ -62,11 +80,14 @@ class Server:
             live=(running or {}).get('progress') or {} if m['cleanupRunning'] else {}
             total=int(live.get('total') or saved.get('total') or 0);done=max(int(live.get('entries') or 0),int(saved.get('deleted') or 0))
             m['cleanupProgress']={'deleted':min(done,total) if total else done,'total':total}
-        return {'ok':True,'version':'0.2.0','seamlessMoves':True,'sharedLinks':True,'moves':moves,'drives':inspect(self.c),'jobs':list(self.jobs),'restartPending':pending_restart(),'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
+        pending=pending_restart()
+        if uid!=0 and pending and pending.get('moveId') not in {m['id'] for m in moves}:
+            pending={k:v for k,v in pending.items() if k in ('valid','thisSession')}
+        return {'ok':True,'version':'0.2.0','seamlessMoves':True,'sharedLinks':True,'moves':moves,'drives':inspect(self.c),'jobs':jobs,'restartPending':pending,'health':self.health.snapshot(),'testFixtureMode':os.environ.get('DRIVES_VM_TESTING')=='1'}
     def schedule(self,method,args,uid,secret=None,automatic=False):
         if self.draining:raise Failure('helper is refreshing its mount namespace; rescan shortly')
         if not self.worker_lock.acquire(blocking=False):raise Failure('another storage operation is already running')
-        job={'id':uuid.uuid4().hex,'method':method,'state':'running','started':time.time()}
+        job={'id':uuid.uuid4().hex,'uid':uid,'method':method,'state':'running','started':time.time()}
         if automatic:job['automatic']=True
         lease=None;leased=False
         def release():
@@ -163,7 +184,7 @@ class Server:
     def dispatch(self,connection,sender,object_path,interface,method,parameters,invocation):
         from gi.repository import GLib
         try:
-            if method=='Status':result=self.status()
+            if method=='Status':result=self.status(self.sender_uid(sender))
             else:
                 uid=self.sender_uid(sender) if method=='AssessMove' else self.authorize(sender,method)
                 args=parameters.unpack();secret=None

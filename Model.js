@@ -18,9 +18,8 @@ function fullest(disks) {
     var max=0;for(var i=0;i<disks.length;i++)if(!disks[i].system)for(var j=0;j<(disks[i].usage||[]).length;j++)max=Math.max(max,disks[i].usage[j].percent||0);
     return max;
 }
-function boundedArgv(argv) {
-    var script = 'o=$1; shift; set -o pipefail; "$@" 2>/dev/null | { head -c "$o"; [ "$(head -c 1 | wc -c)" -eq 0 ] || exit 90; }';
-    return ["/usr/bin/bash","-c",script,"drives-bound","2097152"].concat(argv);
+function boundedArgv(argv, supervisor, seconds, cap) {
+    return ["/usr/bin/python3", "-B", supervisor, String(seconds || 150), String(cap || 2097152)].concat(argv);
 }
 // mounts (optional): the snapshot's mount rows. A drive whose mountpoint is
 // only an idle automount (x-systemd.automount, nothing opened it since boot)
@@ -49,11 +48,28 @@ function configuredDriveState(drive,disks,mounts) {
 // Moved folders on it count: a mounted drive whose binds are down still needs
 // reconnecting (e.g. it was unplugged and plugged back in).
 function driveFix(drive,disks,moves,mounts) {
+    // Mirror UnlockDrive's unfinished eligibility; it validates the existing
+    // LUKS/Btrfs identity and never retries formatting. Old journals can need
+    // a recovery secret too, including after their key was already removed.
+    if(drive.state!=="ready") {
+        var stage=drive.state==="unfinished"?drive.interruptedState:drive.state;
+        var finishable=["formatted","configuring","finalizing"].indexOf(stage)>=0;
+        if(!drive.autoUnlock && (finishable || (drive.manualSecretOnly===true && ["encrypting","encrypted"].indexOf(stage)>=0)))
+            return {action:"recover",secondaryAction:finishable && drive.manualSecretOnly!==true && drive.keyfilePresent!==false?"resume_drive":"",
+                hint:"Finish setup with the recovery passphrase in the separate secure window. Existing encryption is checked, never formatted again."};
+        if(drive.autoUnlock && finishable)return {action:"resume_drive",hint:"Continue the interrupted setup using this computer's existing key. Nothing is formatted again."};
+        return {action:"",hint:"Setup stopped before a safely resumable stage. Inspect the existing header; never format it again."};
+    }
     var state=configuredDriveState(drive,disks,mounts);
     var down=(moves||[]).some(function(m){return m.destMount===drive.mountpoint&&["switched","rebooted","cleaning","cleaned"].indexOf(m.state)>=0&&!m.bound;});
     if(state==="Missing drive")return {action:"",hint:"Plug the drive back in. Folders moved onto it stay locked, so nothing is written to the OS disk."};
-    if(state==="Locked"&&drive.keyfilePresent===false)return {action:"recover",hint:"This computer no longer has the drive's key (reinstall or new machine). Unlock it with the recovery passphrase."};
-    if(state==="Locked"||state==="Not mounted"||((state==="Mounted"||state==="Idle")&&down))return {action:"reconnect",hint:"The drive is connected but not in use. Reconnect it with its own key; no passphrase needed."};
+    if(state==="Locked"||state==="Not mounted"||((state==="Mounted"||state==="Idle")&&down)) {
+        // Manual mode never authorizes keyfile reconnect, even if a legacy
+        // key remains or an older helper omits the optional presence flag.
+        if(drive.autoUnlock===false)return {action:"recover",hint:"This drive opens with its recovery passphrase. Unlock it in the separate secure window to reconnect the drive and its moved folders."};
+        if(drive.keyfilePresent===false)return {action:"recover",hint:"This computer no longer has the drive's key (reinstall or new machine). Unlock it with the recovery passphrase."};
+        return {action:"reconnect",hint:"The drive is connected but not in use. Reconnect it with its own key; no passphrase needed."};
+    }
     return {action:"",hint:""};
 }
 // The ready Drives record for a present disk (exact by-id + serial), or null.

@@ -169,6 +169,7 @@ def test_offline_undo_removes_private_wrapper(tmp_path,monkeypatch,root_metadata
     monkeypatch.setattr(worker,'remove_placeholder',lambda *a:None)
     monkeypatch.setattr(worker,'put_back',lambda *a:None)
     monkeypatch.setattr(worker,'drop_store',lambda *a:None)
+    monkeypatch.setattr(worker.m,'changed',lambda *a:None) # synthetic SRC topology, no real storage admission
     monkeypatch.setattr(configwriter,'write_owned',lambda *a:None)
     monkeypatch.setattr(offline,'say',lambda *a:None)
     assert worker.rollback_move(j)=='undone'

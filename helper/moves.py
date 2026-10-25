@@ -203,7 +203,10 @@ def tree_stats(path,uid=None,progress=None,allow_shared=False):
             if stat.S_ISREG(s.st_mode):count+=1;size+=s.st_size
             if not stat.S_ISDIR(s.st_mode) and s.st_nlink>1:
                 links.setdefault((s.st_dev,s.st_ino),[s.st_nlink,0,p,s.st_size if stat.S_ISREG(s.st_mode) else 0])[1]+=1
-            h.update(len(rel).to_bytes(4,'big'));h.update(rel);h.update(str((s.st_mode,s.st_uid,s.st_gid,s.st_size)).encode())
+            # Directory allocation/entry storage size is filesystem-specific;
+            # rsync separately checks contents, ownership, ACLs and xattrs.
+            portable_size=0 if stat.S_ISDIR(s.st_mode) else s.st_size
+            h.update(len(rel).to_bytes(4,'big'));h.update(rel);h.update(str((s.st_mode,s.st_uid,s.st_gid,portable_size)).encode())
             seen+=1
             if progress and seen%5000==0:progress(seen)
     if progress:progress(seen)
@@ -498,6 +501,7 @@ class MoveManager:
         self.latch('clear',id,value['armedBootId'])
         return {'ok':True,'id':id,'state':'request-cancelled'}
     def copy_layout(self,j):
+        if j.get('discardIntent'):raise Failure('destination discard was interrupted; cancel this plan (retaining any destination) and assess a fresh move')
         # Flat journals remain inspectable and eligible for existing Undo/cleanup,
         # but may never plan a new copy that loses the source's ancestor privacy.
         # Protocol-1 planning cannot authorize Continue (request refuses it).
@@ -692,6 +696,21 @@ class MoveManager:
         if j['state'] not in ('switched','rebooted','cleaning'):raise Failure('move is not eligible for cleanup')
         if open_users(j['backup']):raise Failure('open old-copy files block cleanup')
         if any(r['target']==j['backup'] or r['target'].startswith(j['backup']+'/') for r in mount_rows()):raise Failure('mount in old copy blocks deletion')
+        if self.isolated and j.get('quarantine') and not j['backup'].startswith('/home/'):
+            from helper.quarantine import cleanup_scope
+            scope=cleanup_scope(j)
+            # This namespace intentionally cannot write /.drives-quarantine.
+            # PID1 starts a fixed worker with only that private container writable.
+            self.stage(j,'cleaning')
+            out=run(['systemd-run','--quiet','--wait','--collect','--pipe','--unit=drives-cleanup-'+uuid.uuid4().hex,
+                '--property=WorkingDirectory=/usr/lib/drives-helper','--property=ProtectSystem=strict',
+                '--property=ReadWritePaths='+scope,'--property=ProtectHome=read-only','--property=PrivateTmp=yes',
+                '--property=NoNewPrivileges=yes','--property=CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH',
+                '/usr/bin/python3','-B','-m','helper.quarantine','cleanup',json.dumps(j)],timeout=24*3600)
+            if json.loads(out).get('ok') is not True:raise Failure('cleanup worker did not confirm completion')
+            total=cleanup_total(j);j['cleanup']={'total':total,'deleted':total}
+            if self.progress:self.progress(total,total)
+            self.stage(j,'cleaned');return {'ok':True,'id':id,'state':'cleaned','spaceWarning':'Btrfs snapshots may retain this data; reclaimed space is not guaranteed.'}
         if os.path.lexists(j['backup']):
             with anchored_tree(j['backup']) as (parent,leaf,name):
                 self.changed(j['backup'],j['sourceIdentity'],j.get('sourceUUID'))
@@ -745,7 +764,8 @@ class MoveManager:
         if any(row['target']==path or row['target'].startswith(path+'/') for row in rows for path in targets):raise Failure('mounted source or destination blocks discard')
         self.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
         if j.get('parentIdentity'):self.changed(str(pathlib.Path(j['source']).parent),j['parentIdentity'],j.get('sourceUUID'))
-        if self.recorded_destination(j):self.destination(j)
+        if allow_incomplete and j.get('discardIntent'):pass # only plan retirement; every destination name is retained
+        elif self.recorded_destination(j):self.destination(j)
         elif not allow_incomplete or j.get('maintenanceProtocol')!=2:
             raise Failure('missing destination identity; only safe protocol-2 cancellation is available')
     def discard_destination(self,id,restart=False):
@@ -753,6 +773,17 @@ class MoveManager:
         self.wake(j.get('destMount'))
         if restart:self.copy_layout(j)
         self.discard_admission(j,allow_incomplete=not restart)
+        if j.get('discardIntent'):
+            # The worker may have removed OR recreated a name before its reply
+            # was saved. Never infer ownership of the current occupant. Explicit
+            # Cancel retires only the plan, preserving every destination byte;
+            # a fresh assessment gets a new id/path and does not adopt leftovers.
+            target=j.get('destContainer',j['dest'])
+            j['retainedDestination']=target;j['destinationInspected']=False
+            j['discardRecovered']=j.pop('discardIntent')
+            self.stage(j,'rolled-back')
+            return {'ok':True,'id':id,'state':'rolled-back','retainedDestination':target,'destinationInspected':False,
+                'message':'Interrupted discard cancelled. Any destination directory is retained, not adopted or deleted. Assess a fresh move to retry.'}
         if not self.recorded_destination(j):
             # A failed worker/journal write can leave an unowned directory.
             # Cancel only this plan; NEVER adopt, delete or recreate that path.
@@ -784,12 +815,16 @@ class MoveManager:
             args=['discard-private',j['destContainer'],json.dumps({'identity':j['destIdentity'],'containerIdentity':j['containerIdentity']})]
         else:args=['discard',j['dest'],json.dumps(j['destIdentity'])]
         if restart:args+=['--recreate']
+        j['discardIntent']={'operation':'restart' if restart else 'cancel','target':target,
+            'destIdentity':j['destIdentity'],'containerIdentity':j.get('containerIdentity')}
+        self.c.journal('moves',id,j)
         result=self.destination_op(j,*args)
         if restart:
             j['destIdentity']=result['identity']
             if 'destContainer' in j:j['containerIdentity']=result['containerIdentity']
-            j['verified']=False;self.c.journal('moves',id,j)
+            j['verified']=False;j.pop('discardIntent',None);self.c.journal('moves',id,j)
             return self.execute(j)
+        j.pop('discardIntent',None)
         self.stage(j,'rolled-back');return {'ok':True,'id':id,'state':'rolled-back'}
     def cancel(self,id):return self.discard_destination(id)
     def restart(self,id):return self.discard_destination(id,restart=True)

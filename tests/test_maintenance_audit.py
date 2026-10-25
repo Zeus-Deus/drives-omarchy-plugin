@@ -79,4 +79,6 @@ def test_audit_service_is_explicit_and_packaged():
     text=unit.read_text()
     assert 'DefaultDependencies=no' in text and 'ExecStart=/usr/bin/python3 -B -m helper.maintenance_audit' in text
     assert '[Install]' not in text and 'WantedBy=' not in text
-    assert 'drives-maintenance-audit.service' in (root/'helper/install.sh').read_text()
+    from helper.installation import candidates
+    files=candidates(root)
+    assert files['/etc/systemd/system/drives-maintenance-audit.service'][0]==unit.read_bytes()

@@ -4,15 +4,16 @@ from helper.common import Common,Failure
 
 def test_formatted_stage_has_durable_recovery_metadata(tmp_path,monkeypatch):
     from helper import provisioning as p
-    req={'byId':'/dev/disk/by-id/unit-fixture','serial':'UNIT0001','name':'unit','mountpoint':'/data5','erase':False,'confirmation':'0001','autoUnlock':False}
+    req={'byId':'/dev/disk/by-id/unit-fixture','serial':'UNIT0001','name':'unit','mountpoint':'/data5','erase':False,'confirmation':'0001','autoUnlock':True}
     device='/dev/unit-fixture';disk={'name':device,'serial':req['serial'],'system':False,'mounts':[],'selectable':True}
-    monkeypatch.setattr(p,'snapshot',lambda:{'disks':[disk],'rootEncrypted':False})
+    monkeypatch.setattr(p,'snapshot',lambda:{'disks':[disk],'rootEncrypted':True})
     monkeypatch.setattr(p,'blocks',lambda:{'blockdevices':[{'name':device}]})
     monkeypatch.setattr(p,'chains',lambda _: {})
     monkeypatch.setattr(p,'mount_rows',lambda:[])
     monkeypatch.setattr(p,'prepare_mountpoint',lambda path:None)
     events=[]
     monkeypatch.setattr(p,'udisks_call',lambda *a,**k:events.append(('udisks',a[2])) or ('/org/fake/partition',))
+    monkeypatch.setattr(p,'selected_identity',lambda req,expected=None,partition_object=None:(device+'1','fixture-partuuid') if partition_object else (device,p.block_object(device)))
     monkeypatch.setattr(p,'hide_from_automount',lambda name,luks_uuid=None,serial=None:events.append(('hide',luks_uuid,serial)))
     def run(argv,**k):
         if argv[0]=='wipefs':return b'{"signatures":[]}'

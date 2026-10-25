@@ -18,10 +18,13 @@ never sees a secret: no sudo, pkexec, polkit rule or password field in QML.
 
 `Status()` returns moves, drives, jobs, `restartPending`, `health`,
 `seamlessMoves: true` and
-`testFixtureMode`. The bridge adds disks (id, byId, model, serial, size, system,
+`testFixtureMode`. Move/job records are filtered by the authenticated sender
+UID; root inspection remains complete. Interrupted drive snapshots retain the
+original stage as `interruptedState` without rewriting their journals. The bridge adds disks (id, byId, model, serial, size, system,
 encrypted, mounts, state, selectable, usage, `io` byte counters), mounts,
-`rootEncrypted` and `sampledAt`. The panel polls once a second while open and
-not at all while closed.
+`rootEncrypted` and `sampledAt`. Open-panel status refreshes once a second;
+a slower read-only refresh keeps the bar current while closed. Folder-size
+scans remain tied to explicit panel use.
 
 `health` is a SMART verdict per serial (`passed`, `warning`, `failing`,
 `unavailable` with a reason). The helper runs `smartctl` in the background
@@ -32,13 +35,13 @@ disks report `unavailable`, never a guessed "healthy".
 
 | Method | Polkit action | Notes |
 |---|---|---|
-| `ProvisionDrive(s request, h secretFd)` | `provision` | LUKS2 + keyfile + recovery keyslot, Btrfs on the mapper, crypttab/fstab, header backup. Typed serial fragment checked again in the helper. |
+| `ProvisionDrive(s request, h secretFd)` | `provision` | LUKS2 with recovery passphrase, Btrfs and header backup. Auto-unlock adds an OS key and crypttab/fstab entries; manual mode keeps no OS unlock key. Typed serial fragment checked again in the helper. |
 | `ResumeDrive(s id)` | `resume-drive` | Finish an interrupted setup; never formats again. |
-| `UnlockDrive(s id, h secretFd)` | `unlock` | Recovery passphrase → opens under the configured mapper name, mounts the configured path, reconnects moved folders. |
+| `UnlockDrive(s id, h secretFd)` | `unlock` | Recovery passphrase → opens under the configured mapper name, mounts the configured path, reconnects moved folders or completes an eligible interrupted manual setup without formatting again. |
 | `ReconnectDrive(s id)` | `reconnect` | Drive plugged back in after boot: starts its own `systemd-cryptsetup@` unit (keyfile), mounts it, reconnects moved folders. |
 | `StartMove(s src, s destMount)` | `move` | Plans only. Creates the move's private folder on the drive and journals `awaiting-maintenance`. |
 | `AssessMove(s src, s destMount)` | none | Read-only storage assessment, serialized asynchronous job. Derives the exact unique sender UID; no client-supplied UID. Writes only its job record. |
-| `ScheduleMove(s src, s destMount, b prepareDestination)` | `move` | One authorization: repeats admission, performs explicitly consented mount-root preparation if needed, plans and arms Continue internally. Does not reboot. |
+| `ScheduleMove(s src, s destMount, b prepareDestination, b splitShared)` | `move` | One authorization: rechecks storage and performs consented mount-root preparation and shared-hardlink splitting, then plans and arms Continue. Does not reboot. |
 | `PrepareDrive(s mountpoint)` | `prepare` | Legacy explicit preparation API, retained for compatibility; normal moves include preparation in ScheduleMove. |
 | `ResumeMove(s id)` / `RollbackMove(s id)` | `resume` / `rollback` | Arm the next-boot request for Continue / Undo. |
 | `MoveBack(s id)` | `move` | Arm offline `return` of latest SSD data to its original OS filesystem; old and SSD copies are retained. |
@@ -47,8 +50,27 @@ disks report `unavailable`, never a guessed "healthy".
 | `DeleteOldCopy(s id)` | `delete` | Only after a verified move has survived one normal restart with its bind active. |
 | `ExportHeaderBackup(s name, s destination)` | `export` | Copies the LUKS header backup to a path in the caller's home. |
 
-Secrets only ever arrive as a sealed memfd (8–4096 bytes). Never in argv, the
-environment, D-Bus strings or logs.
+The public Drives helper protocol accepts secrets only through a sealed memfd
+(8–4096 bytes), never argv, environment variables or its JSON/string fields.
+The root helper supplies the recovery passphrase to the trusted UDisks format
+API through its required `encrypt.passphrase` variant. Cryptsetup secret input
+uses stdin or sealed descriptors, not command-line secret values. Secrets are
+not intentionally logged.
+
+### Manual unlock and historical keys
+
+Manual mode uses the recovery passphrase in the separate GTK agent and does
+not persist a random OS unlock key. Legacy interrupted setups may still have
+such a key. Retirement must authenticate its exact slot, retain recovery
+access, and refresh the current header backup before removing the file. Two
+remaining slots alone do not establish which credential belongs to Drives;
+ambiguous layouts require administrator inspection, not a guessed deletion.
+
+Removing a keyslot from the live header and current backup does not revoke an
+independently retained older header plus its then-valid key. As documented in
+`cryptsetup-luksHeaderBackup(8)`, historical header material can still unlock
+the same encrypted data. Treat old headers and keys as sensitive; file deletion
+or slot retirement is not volume-key rotation or secure erasure of old copies.
 
 ### Namespace rule
 
@@ -81,11 +103,14 @@ drives, when the helper is reinstalled.
    not decide admission. Require an ordinary directory strictly inside the
    actual caller's home (any owner). Ownership, permissions and file type never refuse: the root copy keeps
    owners, modes, sockets, FIFOs and device nodes exactly. Refuse existing/nested mounts, source subvolume
-   roots, external hardlinks (naming an example), a destination other than a
+   roots, a destination other than a
    non-system encrypted Btrfs root mount with keyfile unlock, or less than 1.2×
    source apparent size free. Symlinks inside the tree are copied as links;
    source/ancestor symlinks are refused. Leftover socket files are inert names
-   once their owner stopped and are recreated by `rsync -a`.
+   once their owner stopped and are recreated by `rsync -a`. External hardlinks
+   are reported with an example; scheduling requires explicit consent to split
+   those links into separate copies. Internal links remain linked. External
+   names retain their existing data and can prevent reclaiming that space.
    Active use (fd/cwd/mmap/executable) is **reported, not refused**: the result
    carries `inUse` (pid, name, systemd unit) and the review names the apps and
    background services. Nothing is killed. The normal shutdown before the
@@ -109,8 +134,9 @@ drives, when the helper is reinstalled.
    a POSIX ACL, preserving the group identity and removing non-root write
    grants. Previously masked ACL grants remain masked; a private drive is not
    made world-readable. The latch is
-   `/drives-maintenance-request.json`. "Restart now" runs Omarchy's normal
-   `omarchy-system-reboot`.
+   `/drives-maintenance-request.json`. "Restart now" selects an available fixed
+   Omarchy restart command for the supported release; it does not bypass the
+   normal shutdown or construct a command from request text.
 3. **Maintenance boot.** An early generator selects
    `drives-maintenance.target`: no desktop, no user sessions, no timers. A
    sysinit guard keeps a normal boot from starting while the latch exists.
@@ -135,7 +161,18 @@ stanza is removed. Retained SSD and previous original copies are not deleted.
 Manual binds and unwrapped legacy destinations are refused. `canMoveBack` is a
 live advisory; request and offline admission independently recheck all facts.
 
-**Interruptions.** An interrupted Continue puts the untouched original back
+## Interruptions and recovery
+
+If startup stops for recovery, do not remove the maintenance request, delete
+copies, or reformat a drive to get past the screen. An administrator can read
+`sudo systemctl status drives-maintenance-worker.service --no-pager` and
+`sudo journalctl -u drives-maintenance-worker.service -b --no-pager`, plus
+`/var/lib/drives-helper/maintenance.log` and the matching root-private move
+journal. Reconnect missing storage and establish which saved identities and
+copies are present before deciding a recovery action. These logs can contain
+folder paths; review them privately before sharing.
+
+An interrupted Continue puts the untouched original back
 and pauses the move; it never resumes copying on its own. An interrupted Undo
 finishes restoring. Anything ambiguous keeps all copies, marks the move
 "Needs attention" and retains the persistent normal-startup barrier for

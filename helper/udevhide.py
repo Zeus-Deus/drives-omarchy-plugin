@@ -46,18 +46,47 @@ def setup_text(name,serial):
             'SUBSYSTEM=="block", ENV{ID_SERIAL_SHORT}=="'+serial+'", ENV{UDISKS_IGNORE}="1"\n')
 
 
+def owned_rule(path,name,setup=False):
+    """Accept exact shipped bodies, never a merely similar rule syntax.
+
+    There were two final-rule releases (one/two device matches) and one
+    setup-rule release. Extract only the variable, then compare ALL bytes.
+    Marked rules must also match one of these exact bodies.
+    """
+    from helper.ownership import read,unmark,refuse
+    from helper.legacy_udev import render,FINAL_V1,FINAL_V2,SETUP_V1
+    data=read(path,8192)
+    if data is None:return None
+    body=unmark(data) or data
+    if setup:
+        match=re.search(rb'ID_SERIAL_SHORT}=="([A-Za-z0-9._-]{4,64})"',body)
+        expected=render(SETUP_V1,name=name,serial=match[1].decode()) if match else b''
+        valid=bool(expected) and body==expected
+    else:
+        match=re.search(rb'ID_FS_UUID}=="([0-9a-f-]{36})"',body)
+        valid=False
+        if match and UUID.fullmatch(match[1].decode()):
+            uid=match[1].decode()
+            valid=body in tuple(render(parts,name=name,uuid=uid,compact=uid.replace('-','')) for parts in (FINAL_V1,FINAL_V2))
+    if not valid:refuse(path,'foreign or modified udev rule')
+    return data
+
+
 def write(name,luks_uuid,rules=RULES):
-    path=rule_path(name,rules);text=rule_text(name,luks_uuid).encode()
-    if path.is_symlink():raise Failure('refusing symbolic link')
-    if path.exists() and path.read_bytes()==text:return False
+    from helper.ownership import marked,directory
+    path=rule_path(name,rules);text=marked(rule_text(name,luks_uuid).encode())
+    old=owned_rule(path,name)
+    if old==text:return False
+    directory(path.parent)
     atomic(path,text,0o644)
     return True
 
 
 def apply(name,luks_uuid):
-    changed=write(name,luks_uuid,RULES)
     setup=setup_path(name,RULES)
-    if setup.exists() and not setup.is_symlink():setup.unlink();changed=True
+    old_setup=owned_rule(setup,name,True)
+    changed=write(name,luks_uuid,RULES)
+    if old_setup is not None:setup.unlink();changed=True
     if changed:run(['udevadm','control','--reload'],timeout=30)
     # Re-evaluate the partition and its opened volume so udisks drops HintAuto immediately.
     run(['udevadm','trigger','--action=change','--subsystem-match=block','--property-match=ID_FS_UUID='+luks_uuid.lower()],timeout=30)
@@ -66,9 +95,11 @@ def apply(name,luks_uuid):
 
 
 def apply_setup(name,serial,rules=RULES):
-    path=setup_path(name,rules);text=setup_text(name,serial).encode()
-    if path.is_symlink():raise Failure('refusing symbolic link')
-    if not (path.exists() and path.read_bytes()==text):
+    from helper.ownership import marked,directory
+    path=setup_path(name,rules);text=marked(setup_text(name,serial).encode())
+    old=owned_rule(path,name,True)
+    if old!=text:
+        directory(path.parent)
         atomic(path,text,0o644)
         if rules==RULES:run(['udevadm','control','--reload'],timeout=30)
     if rules==RULES:
@@ -79,10 +110,17 @@ def apply_setup(name,serial,rules=RULES):
 def apply_all(state_dir='/var/lib/drives-helper'):
     """Installer upgrade path: cover drives set up before this rule existed."""
     import json
+    from helper.ownership import read
+    ready=[]
     for p in sorted(pathlib.Path(state_dir,'drives').glob('*.json')):
-        try:j=json.loads(p.read_text())
+        try:j=json.loads(read(p,1024*1024))
         except (OSError,ValueError):continue
-        if j.get('state')=='ready' and j.get('luksUUID') and j.get('name'):apply(j['name'],j['luksUUID'])
+        if j.get('state')=='ready' and j.get('luksUUID') and j.get('name'):
+            name=j['name'];uuid=j['luksUUID'];rule_text(name,uuid)
+            owned_rule(rule_path(name,RULES),name)
+            owned_rule(setup_path(name,RULES),name,True)
+            ready.append((name,uuid))
+    for name,uuid in ready:apply(name,uuid)
 
 
 if __name__=='__main__':

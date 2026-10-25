@@ -120,6 +120,7 @@ BarWidget {
             apps.forEach(function(a) { if (a.movable) out.push({kind: "app", id: a.id}); });
         } else if (view === "drive" && chosenDrive) {
             if (chosenDrive.fix.action !== "") out.push({kind: "act", id: chosenDrive.fix.action});
+            if (chosenDrive.fix.secondaryAction) out.push({kind: "act", id: chosenDrive.fix.secondaryAction});
             if (chosenDrive.health && chosenDrive.health.install) out.push({kind: "act", id: "install_smart"});
             if (chosenDrive.usage && targets.some(function(t) { return t.mountpoint === chosenDrive.usage.target; })) out.push({kind: "act", id: "move_here"});
             folderRows.forEach(function(f) { if (cdMount !== "" && f.move.destMount === cdMount) out.push({kind: "move", id: f.id}); });
@@ -268,7 +269,11 @@ BarWidget {
         else if (n.kind === "target") { chooseTarget(n.id); }
         else if (n.kind === "act") act(n.id);
     }
+    function actionAvailable(op) {
+        return ["home", "showall", "move_here", "restart", "install_smart"].indexOf(op) >= 0 || canWrite;
+    }
     function act(op) {
+        if (!actionAvailable(op)) return;
         if (op === "home") return go("overview");
         if (op === "showall") { showAllSpace = true; return; }
         if (op === "move_here" && chosenDrive && chosenDrive.usage) return openSystem(chosenDrive.usage.target);
@@ -281,11 +286,13 @@ BarWidget {
         }
         if (op === "restart")
             return ask("Restart now?\nOpen windows close. This restart takes a little longer while the folder is handled, then your desktop comes back.",
-                       function() { close(); Quickshell.execDetached(["omarchy-system-reboot"]); }, "Restart");
+                       function() { service.submit({op:"reboot"}); }, "Restart");
         if (!canWrite) return;
         if (op === "reconnect" && cdConfigured) return service.submit({op: "reconnect_drive", id: chosenDrive.drive.id});
         if (op === "prepare" && chosenDrive && Model.canPrepare(chosenDrive)) return prepareDrive(chosenDrive.usage.target);
-        if (op === "recover" && cdConfigured)
+        if (op === "resume_drive" && cdConfigured && (chosenDrive.fix.action === op || chosenDrive.fix.secondaryAction === op))
+            return service.submit({op: "resume_drive", id: chosenDrive.drive.id});
+        if (op === "recover" && cdConfigured && chosenDrive.fix.action === op)
             return service.launch(["unlock", "--drive", chosenDrive.drive.id, "--label", Model.display(chosenDrive.drive.name) + " · " + Model.display(chosenDrive.drive.mountpoint)]);
         if (op === "export") return exportHeader();
         if (op === "provision") return provision();
@@ -404,6 +411,7 @@ BarWidget {
         move_back: ["󰕌", "Move back…", ""],
         prepare: ["󰒓", "Prepare for moves…", ""], reconnect: ["󰌆", "Reconnect drive", ""], recover: ["󰌆", "Unlock with recovery passphrase…", ""], export: ["󰈔", "Export header backup", ""],
         move_here: ["󰉒", "Move folder here…", ""], install_smart: ["󰏗", "Install smartmontools for health checks…", ""],
+        resume_drive: ["󰑓", "Continue setup", ""],
         provision: ["󰌾", "Encrypt & set up…", ""], review: ["󰉒", "Review move…", ""], home: ["󰋊", "Back to drives", ""], showall: ["󰁅", "Show all folders", ""]
     })
 
@@ -599,7 +607,7 @@ BarWidget {
         title: words[1]
         iconColor: words[2] === "bad" ? Commons.Color.urgent : root.ink
         titleColor: words[2] === "bad" ? Commons.Color.urgent : root.ink
-        enabled: op === "home" || op === "restart" || root.canWrite
+        enabled: root.actionAvailable(op)
         opacity: enabled ? 1 : 0.45
         onChosen: root.act(op)
     }
@@ -632,9 +640,17 @@ BarWidget {
         textFormat: Text.PlainText
     }
 
-    component Field: TextField {
+    component Field: EditField {
         id: field
         foreground: root.ink
+        onPasteRequested: paste.start()
+        PasteTransfer {
+            id: paste
+            targetField: field
+            allowed: root.ownsInteraction && field.visible && field.activeFocus
+            contextKey: JSON.stringify([root.view, root.addStep, root.moveTarget, root.selectedKey, root.selectedDiskId])
+            onFailed: function(message) { service.error = message; }
+        }
         onActiveFocusChanged: if (activeFocus) root.ensureVisible(field)
         Keys.onEscapePressed: catcher.forceActiveFocus()
     }
@@ -790,7 +806,7 @@ BarWidget {
                                     bordered: true
                                     foreground: root.ink
                                     fontFamily: root.face
-                                    text: alertCard.a.fix.action === "recover" ? "󰌆  Unlock with recovery passphrase…" : "󰌆  Reconnect drive"
+                                    text: root.actionWords[alertCard.a.fix.action][0] + "  " + root.actionWords[alertCard.a.fix.action][1]
                                     enabled: root.canWrite
                                     onClicked: { root.selectedKey = alertCard.a.key; root.act(alertCard.a.fix.action); }
                                 }
@@ -1096,6 +1112,7 @@ BarWidget {
                         Note { visible: text !== ""; text: root.cd.fix ? root.cd.fix.hint : ""; color: Commons.Color.urgent }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "reconnect"; op: "reconnect" }
                         ActionRow { visible: root.cd.fix !== undefined && root.cd.fix.action === "recover"; op: "recover" }
+                        ActionRow { visible: root.cd.fix !== undefined && (root.cd.fix.action === "resume_drive" || root.cd.fix.secondaryAction === "resume_drive"); op: "resume_drive" }
                         ActionRow { visible: !!(root.cd.health && root.cd.health.install); op: "install_smart" }
 
                         Note { visible: root.cd.manual === true; text: "Set up outside this panel. Drives shows it and its folders but doesn't change its crypttab or fstab lines."; }

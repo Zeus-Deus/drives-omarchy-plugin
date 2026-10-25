@@ -17,6 +17,7 @@ Item {
     property var rates: ({})
     readonly property bool mutating: (busy && request.op !== "status") || pending !== null
     readonly property string bridgePath: decodeURIComponent(Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//,""))
+    readonly property string supervisorPath: decodeURIComponent(Qt.resolvedUrl("supervisor.py").toString().replace(/^file:\/\//,""))
     readonly property string agentPath: decodeURIComponent(Qt.resolvedUrl("helper/agent.py").toString().replace(/^file:\/\//,""))
     signal launching()
     property int requestEpoch: 0
@@ -24,7 +25,7 @@ Item {
     property var finishedRequest: null
     signal finished(var result, var req)
 
-    function refresh() { if (opened && !busy) submit({op:"status"}); }
+    function refresh() { if (!busy) submit({op:"status"}); }
     function submit(req) {
         if (busy) {
             if (request.op === "status" && req.op !== "status" && pending === null) {
@@ -37,7 +38,7 @@ Item {
         if (worker.running) return false;
         requestEpoch++; timedOut = false;
         request = req; busy = true; suppress = false;
-        worker.command = Model.boundedArgv(["/usr/bin/python3","-B",bridgePath]);
+        worker.command = Model.boundedArgv(["/usr/bin/python3","-B",bridgePath], supervisorPath, req.op === "status" ? 9 : 145);
         deadline.interval = req.op === "status" ? 10000 : 150000;
         deadline.restart(); worker.stdinEnabled=true; worker.running = true;
         return true;
@@ -74,7 +75,7 @@ Item {
     function timeoutBridge() {
         if (!busy) return;
         timedOut = true;
-        if (worker.running) worker.signal(9);
+        if (worker.running) worker.signal(15);
         else complete(-1);
     }
     // ---- folder sizes (read-only du, as this user, streamed line by line) ----
@@ -98,7 +99,7 @@ Item {
         if (!force && same && sizedAt > 0 && Date.now() - sizedAt < 600000 && sizes.done) return;
         sizeRequest = {op: "sizes", paths: paths};
         sizes = Model.emptySizes(true); sizeStarted = Date.now(); now = sizeStarted;
-        sizer.command = Model.boundedArgv(["/usr/bin/python3", "-B", bridgePath, "--sizes"]);
+        sizer.command = Model.boundedArgv(["/usr/bin/python3", "-B", bridgePath, "--sizes"], supervisorPath, 160);
         sizer.stdinEnabled = true; sizer.running = true;
     }
     Process {
@@ -121,9 +122,14 @@ Item {
     }
     onOpenedChanged: {
         if (opened) refresh();
-        else if (busy && request.op === "status") { suppress=true; if(worker.running) worker.signal(15); }
+        else {
+            queuedPaths = null;
+            if (sizer.running) sizer.signal(15);
+            if (busy && request.op === "status") { suppress=true; if(worker.running) worker.signal(15); }
+        }
     }
-    Timer { interval:1000; repeat:true; running:root.opened; onTriggered:root.refresh(); }
+    Component.onCompleted: refresh()
+    Timer { interval:root.opened ? 1000 : 30000; repeat:true; running:true; onTriggered:root.refresh(); }
     Timer {
         id:deadline
         onTriggered: root.timeoutBridge()

@@ -196,6 +196,36 @@ class Offline:
         os.rmdir(path);durable_directory(str(pathlib.Path(path).parent))
         j.pop('placeholderIdentity',None);self.c.journal('moves',j['id'],j)
 
+    def restoration_storage(self,j):
+        """Prove the original filesystem before configuration or names change.
+
+        st_dev is boot-local; UUID plus inode/subvolume pins durable identity.
+        Legacy journals without parentIdentity retain their original admission.
+        """
+        parent=str(safe_path(j['source']).parent)
+        if j.get('parentIdentity'):
+            self.m.changed(parent,j['parentIdentity'],j.get('sourceUUID'))
+        elif j.get('sourceUUID'):
+            self.m.changed(parent,identity(parent),j['sourceUUID'])
+        store=j.get('quarantine')
+        if store:
+            expected=j['sourceMount'].rstrip('/')+'/.drives-quarantine/'+j['id']
+            if store['path']!=expected:raise Unsafe('quarantine layout changed')
+            if os.path.lexists(store['path']):
+                self.m.changed(store['path'],store['identity'],j.get('sourceUUID'))
+                with anchored_tree(store['path']) as (_,fd,_):
+                    held=private_store_fd(fd);origin=identity(parent)
+                    if held[1:]!=store['identity'][1:] or held[0]!=origin[0] or held[2:]!=origin[2:]:raise Unsafe('quarantine storage identity changed')
+                original=store['path']+'/original'
+                if os.path.lexists(original):self.m.changed(original,j['sourceIdentity'],j.get('sourceUUID'))
+                else:self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
+            else:
+                # A cut after put_back/drop_store is safe only with the original
+                # already restored; absence is never authority to adopt a path.
+                self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
+
+        else:self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
+
     def put_back(self,j):
         """Rename the quarantined original back to its familiar path."""
         source=pathlib.Path(j['source']);store=j.get('quarantine')
@@ -207,7 +237,9 @@ class Offline:
         if identity(str(original))[1:]!=j['sourceIdentity'][1:]:raise Unsafe('quarantined original identity changed')
         import ctypes
         with anchored_tree(str(original)) as (storefd,_,_),anchored_tree(str(source.parent)) as (_,parentfd,_):
-            private_store_fd(storefd)
+            held=private_store_fd(storefd);parent=identity_fd(parentfd)
+            if held[1:]!=store['identity'][1:] or held[0]!=parent[0] or held[2:]!=parent[2:]:raise Unsafe('quarantine changed before restoration')
+            if j.get('parentIdentity') and parent[1:]!=j['parentIdentity'][1:]:raise Unsafe('source parent changed before restoration')
             rename=ctypes.CDLL(None,use_errno=True).renameat2
             rename.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint];rename.restype=ctypes.c_int
             if rename(storefd,b'original',parentfd,os.fsencode(source.name),1)!=0:raise Unsafe('restoring the original failed: '+os.strerror(ctypes.get_errno()))
@@ -225,10 +257,12 @@ class Offline:
     def restore(self,j,reason):
         """Return to the exact pre-move state. Destination copy is retained."""
         from helper.configwriter import write_owned
+        self.restoration_storage(j)
         say('restoring the original folder')
         write_owned(self.c,'fstab',j['id'],None)
         self.unbind(j);self.remove_placeholder(j);self.put_back(j);self.drop_store(j)
         if identity(j['source'])[1:]!=j['sourceIdentity'][1:]:raise Unsafe('restored original identity differs')
+        self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
         if 'destContainer' in j and os.path.lexists(j['destContainer']):self.m.private_destination(j)
         # Back to the pre-move situation: original in use, destination is only a
         # disposable seed, so Continue/Cancel/Start over are all safe again.
@@ -239,6 +273,7 @@ class Offline:
 
     # --- Continue ----------------------------------------------------------------
     def continue_move(self,j):
+        if j.get('discardIntent'):raise Unsafe('destination discard was interrupted; cancel the plan before a fresh move')
         if j['state']=='switched':return 'already moved'
         if j['state'] in OFFLINE:
             try:
@@ -514,10 +549,12 @@ class Offline:
         SCREEN.step('switch')
         # From here on the only safe direction is forward: finish restoring.
         try:
+            self.restoration_storage(j)
             from helper.configwriter import write_owned
             write_owned(self.c,'fstab',j['id'],None)
             self.unbind(j);self.remove_placeholder(j);self.put_back(j);self.drop_store(j)
             if identity(j['source'])[1:]!=j['sourceIdentity'][1:]:raise Unsafe('restored original identity differs')
+            self.m.changed(j['source'],j['sourceIdentity'],j.get('sourceUUID'))
             if 'destContainer' in j:
                 from helper.destination import discard_private
                 self.m.private_layout(j)

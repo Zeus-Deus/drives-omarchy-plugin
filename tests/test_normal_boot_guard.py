@@ -35,10 +35,15 @@ def test_persistent_sysinit_barrier_is_packaged():
     assert 'ExecStart=/usr/bin/python3 -I -B /usr/lib/drives-helper/normal_boot_guard.py' in text
     assert '[Install]' not in text and 'ConditionPath' not in text and 'ExecCondition' not in text
     drop=ROOT/'packaging/drives-sysinit-guard.conf'
-    assert drop.read_text()=='[Unit]\nRequires=drives-normal-boot-guard.service\nAfter=drives-normal-boot-guard.service\n'
+    content='\n'.join(line for line in drop.read_text().splitlines() if not line.startswith('#'))+'\n'
+    assert content=='[Unit]\nRequires=drives-normal-boot-guard.service\nAfter=drives-normal-boot-guard.service\n'
     install=(ROOT/'helper/install.sh').read_text()
-    assert 'normal_boot_guard.py' in install and 'drives-normal-boot-guard.service' in install
-    assert '/etc/systemd/system/sysinit.target.d' in install and 'drives-sysinit-guard.conf' in install
+    from helper.installation import candidates
+    files=candidates(ROOT)
+    assert 'helper.installation install' in install
+    assert files['/usr/lib/drives-helper/normal_boot_guard.py'][0]==(ROOT/'helper/normal_boot_guard.py').read_bytes()
+    assert '/etc/systemd/system/drives-normal-boot-guard.service' in files
+    assert files['/etc/systemd/system/sysinit.target.d/drives-normal-boot-guard.conf'][0]==drop.read_bytes()
 
 
 def test_guard_has_no_helper_import_and_accepts_no_cli_override(tmp_path):

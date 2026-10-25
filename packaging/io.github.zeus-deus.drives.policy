@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Drives-owned: io.github.zeus-deus.drives; content recorded in .ownership.json -->
 <policyconfig>
 <action id="io.github.zeus-deus.drives.provision"><description>Drives: provision</description><message>Administrator authorization is required for this storage operation.</message><defaults><allow_any>no</allow_any><allow_inactive>no</allow_inactive><allow_active>auth_admin</allow_active></defaults></action>
 <action id="io.github.zeus-deus.drives.move"><description>Drives: move</description><message>Administrator authorization is required for this storage operation.</message><defaults><allow_any>no</allow_any><allow_inactive>no</allow_inactive><allow_active>auth_admin</allow_active></defaults></action>

@@ -23,24 +23,23 @@ OWNED=[
 
 
 def harness(tmp_path):
-    assert os.geteuid()==0,'run uninstall qualification as root inside the test guest'
-    paths=OWNED+['/drives-maintenance-request.json','/run/drives-maintenance']
-    mapped={name:tmp_path/('path-'+str(index)) for index,name in enumerate(paths)}
+    # Reuse the fully remapped runner, but populate exact shipped unmarked
+    # legacy bytes rather than claiming arbitrary fixture strings are owned.
+    import test_installation_ownership as fixtures
+    fs,source,runner,log,env=fixtures.harness(tmp_path,'uninstall')
+    mapped={name:fs/name.lstrip('/') for name in OWNED+['/drives-maintenance-request.json','/run/drives-maintenance']}
     mapped['/run/drives-maintenance/boot.json']=mapped['/run/drives-maintenance']/'boot.json'
-    for name in OWNED:mapped[name].write_bytes(('owned:'+name).encode())
-    script=(ROOT/'helper/uninstall.sh').read_text()
-    for name in sorted(mapped,key=len,reverse=True):script=script.replace(name,str(mapped[name]))
-    # Every absolute path the script would remove must be remapped, or the
-    # test deletes real files from the guest it runs in.
-    import re
-    leaked=[p for p in re.findall(r'(?<![\w.-])/(?:etc|usr|run)/[\w./@-]+',script) if not p.startswith(str(tmp_path))]
-    assert not [p for p in leaked if not p.startswith(('/usr/bin','/run/drives-maintenance'))],leaked
-    runner=tmp_path/'uninstall.sh';runner.write_text(script)
-    spy=tmp_path/'systemctl'
-    spy.write_text('#!/usr/bin/python3\nimport json,os,pathlib,sys\na=sys.argv[1:]\nwith open(os.environ["SPY_LOG"],"a") as f:f.write(json.dumps(a)+"\\n")\nif a[0]=="show":print(os.environ.get("TARGET_STATE","inactive"))\nif a[0]=="stop" and os.environ.get("LATE_LATCH"):pathlib.Path(os.environ["LATE_LATCH"]).write_text("late request")\n')
-    spy.chmod(0o755)
-    log=tmp_path/'calls.jsonl'
-    env={'PATH':str(tmp_path)+':/usr/bin:/bin','SPY_LOG':str(log),'LC_ALL':'C'}
+    for name in OWNED:
+        if name.endswith('/normal_boot_guard.py'):data=(ROOT/'helper/normal_boot_guard.py').read_bytes()
+        else:
+            base=pathlib.Path(name).name
+            if base=='drives-normal-boot-guard.conf':base='drives-sysinit-guard.conf'
+            data=(ROOT/'packaging'/base).read_bytes()
+            data=b''.join(line for line in data.splitlines(keepends=True) if b'Drives-owned:' not in line)
+        mapped[name].parent.mkdir(parents=True,exist_ok=True);mapped[name].write_bytes(data)
+    mapped['/run/drives-maintenance'].parent.mkdir(parents=True,exist_ok=True)
+    spy=tmp_path/'bin/systemctl'
+    spy.write_text(spy.read_text()+ '\nif a[0]=="stop" and os.environ.get("LATE_LATCH"):__import__("pathlib").Path(os.environ["LATE_LATCH"]).write_text("late request")\n')
     return mapped,runner,log,env
 
 

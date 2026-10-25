@@ -67,6 +67,26 @@ function assessed(c, prep = true) {
     c.handleAssessment({id:'assessment-1',method:'AssessMove',state:'done',result:{ok:true,source:'/home/u/.config',destMount:'/data',needsPreparation:prep,stats:{bytes:2048,files:7}}});
     return req;
 }
+test('closed bar refresh obtains status without starting folder measurement',()=>{
+    const c=serviceHarness();c.opened=false;c.refresh();
+    assert.equal(c.busy,true);assert.equal(c.request.op,'status');
+});
+test('Show all has the same helper-free pointer and keyboard availability',()=>{
+    const source=fs.readFileSync(path.join(repo,'Panel.qml'),'utf8');
+    const expr=source.match(/component ActionRow:[\s\S]*?enabled: (.*)/)[1];
+    const c=panel();c.storage.helperAvailable=false;c.op='showall';
+    assert.equal(vm.runInContext(expr,c),true);
+    c.act('showall');assert.equal(c.showAllSpace,true);
+});
+test('restart is supervised and does not silently close before launch failure',()=>{
+    const c=panel();c.Quickshell.execDetached=()=>{};c.act('restart');c.confirmationAction();
+    assert.equal(c.requests.at(-1)?.op,'reboot');
+    assert.equal(c.controller.open,true);
+});
+test('editable fields never instantiate native TextInput-based controls',()=>{
+    const source=fs.readFileSync(path.join(repo,'Panel.qml'),'utf8');
+    assert.doesNotMatch(source,/\b(?:TextField|TextInput|NumberField)\s*\{/);
+});
 test('SSD-first flow offers home folders and retains the selected SSD through selection',()=>{
     const c=panel();
     c.selectedKey='disk:bulk';
@@ -165,7 +185,7 @@ function serviceHarness() {
     const c=vm.createContext({Model:model(),console});
     vm.runInContext(`var root=this,opened=true,busy=false,loaded=false,suppress=false,pending=null,error='';
         var request={op:'status'},snapshot={disks:[]},rates={},requestEpoch=0,timedOut=false;
-        var bridgePath='/fixture/bridge.py',worker={running:false,signal:function(){},stdinEnabled:false},output={text:''};
+        var supervisorPath='/fixture/supervisor.py',bridgePath='/fixture/bridge.py',worker={running:false,signal:function(){},stdinEnabled:false},output={text:''};
         var deadline={restart:function(){},stop:function(){},interval:0};
         var later=[],Qt={callLater:function(fn){later.push(fn);}},events=[];
         function finished(result,req){events.push({result:result,req:req});}
@@ -419,4 +439,24 @@ test('review names files shared through hard links and confirming it consents to
     assert.doesNotMatch(c.moveReview({source:'/home/u/x',destMount:'/data',stats:{bytes:1,files:1},inUse:[]}),/linked from outside/);
     const panel=fs.readFileSync(path.join(__dirname,'../Panel.qml'),'utf8');
     assert.match(panel,/splitShared: split/);
+});
+
+function pasteHarness(){
+    const c=vm.createContext({Model:model()});
+    vm.runInContext(`var root=this,epoch=0,ticket=null,allowed=true,contextKey='view-a',supervisorPath='/supervisor.py',pastePath='/paste.py';
+        var targetField=field={text:'old',cursorPosition:2,selectionStart:2,selectionEnd:2,insertText:function(s){this.inserted=s;}};
+        var worker={running:false,signal:function(n){this.signalled=n;}},output={text:'{"ok":true,"text":"é漢"}'},errors=[];
+        function failed(e){errors.push(e);}`,c);
+    vm.runInContext(functions(fs.readFileSync(path.join(repo,'PasteTransfer.qml'),'utf8')),c);return c;
+}
+test('paste inserts Unicode only for its exact focused request',()=>{const c=pasteHarness();c.start();c.complete(0);assert.equal(c.field.inserted,'é漢');});
+for(const [name,change] of [
+    ['focus',c=>c.allowed=false],['view',c=>c.contextKey='view-b'],['text',c=>c.field.text='new'],
+    ['cursor',c=>c.field.cursorPosition=1],['selection',c=>c.field.selectionEnd=3],
+    ['request ABA',c=>c.cancel()]
+])test('paste discards retired '+name,()=>{const c=pasteHarness();c.start();change(c);c.complete(0);assert.equal(c.field.inserted,undefined);});
+test('paste refuses reuse until producer teardown and reports failures',()=>{
+    const c=pasteHarness();c.start();const old=c.ticket;c.worker.running=true;c.start();assert.equal(c.ticket,old);
+    c.complete(124);assert.equal(c.field.inserted,undefined);assert.equal(c.errors.length,1);
+    c.worker.running=false;c.start();c.output.text='{"ok":false,"error":"too large"}';c.complete(0);assert.equal(c.errors.length,2);
 });

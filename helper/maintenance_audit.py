@@ -1,7 +1,7 @@
 """Fail-closed runtime maintenance observations; never authorizes a live cutover.
 
 A successful observation is not a durable writer lease. The offline worker must
-hold the boot gate and recheck before irreversible steps; no move calls this yet.
+hold the boot gate and repeat these checks before irreversible steps.
 """
 import json,os,pathlib
 from helper.common import Failure,boot_id,read_regular,run

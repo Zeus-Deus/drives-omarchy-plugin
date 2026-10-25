@@ -1,4 +1,5 @@
 #!/bin/sh
+# Drives-owned: io.github.zeus-deus.drives; content recorded in .ownership.json
 # systemd supplies normal, early and late output directories.
 /usr/bin/python3 -B -c 'import sys; sys.path.insert(0,"/usr/lib/drives-helper"); from helper.maintenance import generate; generate(sys.argv[2])' "$@" && exit 0
 # Import/interpreter/receipt failures must not hide an existing root latch.

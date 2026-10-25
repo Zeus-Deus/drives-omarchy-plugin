@@ -35,6 +35,8 @@ def test_initial_provision_keeps_finalizing_if_ready_save_fails(tmp_path,monkeyp
     monkeypatch.setattr(p,'mount_rows',lambda:[])
     monkeypatch.setattr(p,'prepare_mountpoint',lambda path:None)
     monkeypatch.setattr(p,'udisks_call',lambda *a,**k:('/org/fake/partition',))
+    monkeypatch.setattr(p,'selected_identity',lambda req,expected=None,partition_object=None:(device+'1','fixture-partuuid') if partition_object else (device,p.block_object(device)))
+    monkeypatch.setattr(p,'hide_from_automount',lambda *a,**k:None)
     Path=pathlib.Path
     def run(argv,**kwargs):
         if argv[0]=='wipefs':return b'{"signatures":[]}'
@@ -52,7 +54,8 @@ def test_initial_provision_keeps_finalizing_if_ready_save_fails(tmp_path,monkeyp
     monkeypatch.setattr(c,'journal',journal)
     def finish(j,common):
         j['state']='finalizing';common.journal('drives',j['id'],j)
-        Path(j['keyfile']).unlink();j['keyfile']=None;j['state']='ready';common.journal('drives',j['id'],j)
+        assert j['keyfile'] is None  # new manual setup has no on-disk key
+        j['state']='ready';common.journal('drives',j['id'],j)
     monkeypatch.setattr(p,'finish',finish)
     with pytest.raises(Failure,match='ready save failure'):p.provision(req,secrets.token_urlsafe().encode(),c)
     assert c.records('drives')[0]['interruptedState']=='finalizing'

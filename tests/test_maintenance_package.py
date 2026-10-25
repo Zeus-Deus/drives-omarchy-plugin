@@ -15,7 +15,11 @@ def test_minimal_maintenance_target_and_generator_are_packaged():
     assert launcher.is_file(),'early generator launcher is not packaged'
     assert '/usr/lib/drives-helper' in launcher.read_text()
     install=(ROOT/'helper/install.sh').read_text()
-    assert '/etc/systemd/system-generators' in install and 'drives-maintenance.target' in install
+    from helper.installation import candidates
+    files=candidates(ROOT)
+    assert '/etc/systemd/system-generators/drives-maintenance-generator' in files
+    assert '/etc/systemd/system/drives-maintenance.target' in files
+    assert 'helper.installation install' in install
 
 
 def test_maintenance_ends_boot_splash_without_normal_boot_dependencies():
@@ -37,5 +41,6 @@ def test_maintenance_ends_boot_splash_without_normal_boot_dependencies():
     for key in ('Requires','After'):
         value=next(line.split('=',1)[1].split() for line in target.splitlines() if line.startswith(key+'='))
         assert 'drives-maintenance-splash.service' in value
-    assert 'drives-maintenance-splash.service' in (ROOT/'helper/install.sh').read_text()
+    from helper.installation import candidates
+    assert '/etc/systemd/system/drives-maintenance-splash.service' in candidates(ROOT)
     assert not any(x in text for x in ('sysinit.target','basic.target','local-fs.target','multi-user.target','graphical.target','plymouth-quit.service','plymouth-quit-wait.service'))

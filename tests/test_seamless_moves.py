@@ -164,14 +164,13 @@ def test_assessment_is_readonly_and_reports_required_preparation(admission,monke
     assert a.c.records('moves')==[] and a.c.records('drives')==[]
     assert (pathlib.Path(a.dest)/'existing').read_bytes()==b'untouched fixture'
 
-@pytest.mark.parametrize('kind',['nested','hardlink','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
+@pytest.mark.parametrize('kind',['nested','space','keyfile','system-destination','journal','pending','readonly','unsupported'])
 def test_assessment_checks_real_refusals_before_any_preparation(admission,monkeypatch,kind):
     from helper import preparedrive,offline,maintenance
     import topology
     a=admission
     monkeypatch.setattr(preparedrive,'run_isolated',lambda *a,**k:pytest.fail('refusal prepared destination'))
     if kind=='nested':a.rows.append({**a.rows[0],'target':a.src+'/nested'})
-    elif kind=='hardlink':os.link(pathlib.Path(a.src)/'state.sqlite',pathlib.Path(a.dest)/'alias')
     elif kind=='space':monkeypatch.setattr(moves.os,'statvfs',lambda p:types.SimpleNamespace(f_bavail=0,f_frsize=4096))
     elif kind=='keyfile':monkeypatch.setattr(offline,'crypttab_key',lambda m:(_ for _ in ()).throw(Failure('fixture missing keyfile')))
     elif kind=='system-destination':monkeypatch.setattr(topology,'classify',lambda *a:[{'name':'/dev/data','system':True}])
@@ -181,6 +180,20 @@ def test_assessment_checks_real_refusals_before_any_preparation(admission,monkey
     else:a.source_top['supported']=False
     with pytest.raises(Failure):a.m.assess(a.src,a.dest)
     assert len(a.c.records('moves'))==(1 if kind=='journal' else 0)
+
+
+def test_assessment_reports_shared_links_readonly_and_scheduling_requires_consent(admission,monkeypatch):
+    from helper import preparedrive
+    a=admission
+    token=pathlib.Path(a.src)/'state.sqlite';alias=pathlib.Path(a.dest)/'alias'
+    os.link(token,alias);before=token.read_bytes()
+    monkeypatch.setattr(preparedrive,'run_isolated',lambda *a,**k:pytest.fail('assessment or refused scheduling mutated destination'))
+    result=a.m.assess(a.src,a.dest)
+    assert result['stats']['shared']['files']==1
+    assert result['stats']['shared']['bytes']==len(before)
+    with pytest.raises(Failure,match='hard links'):a.m.schedule_move(a.src,a.dest,True)
+    assert a.c.records('moves')==[] and alias.read_bytes()==token.read_bytes()==before
+    assert os.stat(alias).st_ino==os.stat(token).st_ino
 
 
 def test_assessment_secure_destination_does_not_need_preparation(admission):

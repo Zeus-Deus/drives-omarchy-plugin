@@ -37,7 +37,8 @@ def test_installer_upgrade_covers_existing_ready_drives(tmp_path,monkeypatch):
 
 
 def test_install_runs_the_upgrade_and_recovery_unlock_hides_the_volume():
-    assert 'helper.udevhide --all' in (ROOT/'helper/install.sh').read_text()
+    assert 'helper.installation install' in (ROOT/'helper/install.sh').read_text()
+    assert 'ready_rules()' in (ROOT/'helper/installation.py').read_text()
     assert 'hide_from_automount' in (ROOT/'helper/provisioning.py').read_text()
     assert 'hide_from_automount' in (ROOT/'helper/driveconfig.py').read_text()
 

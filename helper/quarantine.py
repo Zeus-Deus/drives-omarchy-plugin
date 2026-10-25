@@ -1,12 +1,13 @@
 """Quarantine primitives; caller must already maintain offline writer exclusion.
 
-No D-Bus/CLI entrypoint, automatic migration or proof of exclusion is provided
-by this module. The normal-session MoveManager still defers all cutovers.
+The root-only cleanup worker removes only a previously journalled original;
+it provides no migration or writer-exclusion authority for cutover. The
+normal-session MoveManager still defers all cutovers.
 """
-import contextlib,ctypes,os,pathlib,re,stat
+import contextlib,ctypes,json,os,pathlib,re,stat,sys
 from helper.common import Failure,mount_rows
 from helper.maintenance import private_directory
-from helper.moves import anchored_tree,identity_fd,safe_path
+from helper.moves import anchored_tree,identity,identity_fd,safe_path
 
 
 def closed_hardlinks(path,allow_external=False):
@@ -90,3 +91,50 @@ def move_original(source,expected,store,allow_external=False):
             error=ctypes.get_errno();raise Failure('quarantine rename refused: '+os.strerror(error))
         os.fsync(parent);os.fsync(storefd)
     return {'path':str(pathlib.Path(store['path'])/'original'),'identity':current}
+
+
+def cleanup_scope(j):
+    """Only the root-private quarantine container, never / or a drive mount."""
+    if not re.fullmatch('[a-f0-9]{32}',j['id']):raise Failure('invalid quarantine move id')
+    store=safe_path(j['quarantine']['path'])
+    expected=j['sourceMount'].rstrip('/')+'/.drives-quarantine/'+j['id']
+    if str(store)!=expected or j['backup']!=str(store/'original'):raise Failure('quarantine cleanup layout changed')
+    private_directory(store.parent)
+    return str(store.parent)
+
+
+def cleanup(j):
+    """Resumable fixed worker; delete only the journalled original and store."""
+    from helper.moves import MoveManager,delete_tree_fd
+    scope=cleanup_scope(j);store=j['quarantine'];m=MoveManager(None)
+    m.changed(scope,identity(scope),j.get('sourceUUID'))
+    if any(r['target']==scope or r['target'].startswith(scope+'/') for r in mount_rows()):raise Failure('mount in quarantine blocks deletion')
+    with anchored_tree(scope) as (_,container,_):
+        private_store_fd(container)
+        try:fd=os.open(j['id'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=container)
+        except FileNotFoundError:return {'ok':True}
+        try:
+            held=private_store_fd(fd)
+            if held[1:]!=store['identity'][1:]:raise Failure('quarantine store identity changed')
+            if set(os.listdir(fd))-{'original'}:raise Failure('unexpected quarantine entries')
+            try:leaf=os.open('original',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            except FileNotFoundError:pass
+            else:
+                try:
+                    current=identity_fd(leaf)
+                    if current[1:]!=j['sourceIdentity'][1:] or current[0]!=held[0] or current[2:]!=held[2:]:raise Failure('original identity changed')
+                    delete_tree_fd(leaf)
+                    now=os.stat('original',dir_fd=fd,follow_symlinks=False)
+                    if (now.st_dev,now.st_ino)!=(current[0],current[1]):raise Failure('original name changed')
+                    os.rmdir('original',dir_fd=fd);os.fsync(fd)
+                finally:os.close(leaf)
+            now=os.stat(j['id'],dir_fd=container,follow_symlinks=False)
+            if (now.st_dev,now.st_ino)!=(held[0],held[1]):raise Failure('quarantine name changed')
+            os.rmdir(j['id'],dir_fd=container);os.fsync(container)
+        finally:os.close(fd)
+    return {'ok':True}
+
+
+if __name__=='__main__':
+    if os.geteuid()!=0 or len(sys.argv)!=3 or sys.argv[1]!='cleanup':raise Failure('invalid root-only quarantine worker invocation')
+    print(json.dumps(cleanup(json.loads(sys.argv[2]))))

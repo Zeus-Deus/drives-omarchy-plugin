@@ -21,7 +21,7 @@ def validate_request(req):
 def udisks_call(path,interface,method,signature,args,timeout=180000):
     from gi.repository import Gio,GLib
     bus=Gio.bus_get_sync(Gio.BusType.SYSTEM,None)
-    try:return bus.call_sync('org.freedesktop.UDisks2',path,'org.freedesktop.UDisks2.'+interface,method,GLib.Variant(signature,args),None,Gio.DBusCallFlags.NONE,timeout,None).unpack()
+    try:return bus.call_sync('org.freedesktop.UDisks2',path,interface if interface.startswith('org.') else 'org.freedesktop.UDisks2.'+interface,method,GLib.Variant(signature,args),None,Gio.DBusCallFlags.NONE,timeout,None).unpack()
     except GLib.Error as e:raise Failure('udisks '+method+' failed: '+str(e).split(':')[-1][:200]) from e
 
 def block_object(device):
@@ -29,12 +29,49 @@ def block_object(device):
     name=os.path.basename(device)
     return '/org/freedesktop/UDisks2/block_devices/'+''.join(c if c.isalnum() else '_%02x'%ord(c) for c in name)
 
+def selected_identity(req,expected=None,partition_object=None):
+    """Fresh, fail-closed handoff to UDisks; never derive child device names.
+
+    UDisks Format has no expected-identity argument: this narrows the handoff,
+    not an atomic hotplug exclusion guarantee across the remote method call.
+    Properties/signatures are from the installed UDisks2 interface XML.
+    """
+    device=os.path.realpath(req['byId'],strict=True)
+    disks=[d for d in snapshot()['disks'] if d['name']==device]
+    if len(disks)!=1 or disks[0]['serial']!=req['serial'] or disks[0]['system'] or disks[0]['mounts'] or not disks[0]['selectable']:raise Failure('disk identity or exclusion changed')
+    objects=udisks_call('/org/freedesktop/UDisks2','org.freedesktop.DBus.ObjectManager','GetManagedObjects','()',())[0]
+    prefix='org.freedesktop.UDisks2.'
+    def block(path):
+        props=objects.get(path,{}).get(prefix+'Block',{})
+        raw=bytes(props.get('Device',b''))
+        if not raw.endswith(b'\0'):raise Failure('invalid UDisks device identity')
+        name=os.fsdecode(raw[:-1]);info=os.stat(name)
+        if not stat.S_ISBLK(info.st_mode) or info.st_rdev!=props.get('DeviceNumber'):raise Failure('UDisks device number changed')
+        return props,name
+    candidates=[path for path,interfaces in objects.items() if bytes(interfaces.get(prefix+'Block',{}).get('Device',b''))==os.fsencode(device)+b'\0']
+    if len(candidates)!=1:raise Failure('selected disk has no unique UDisks object')
+    obj=candidates[0];props,_=block(obj);drive=props.get('Drive')
+    if objects.get(drive,{}).get(prefix+'Drive',{}).get('Serial')!=req['serial']:raise Failure('UDisks drive identity changed')
+    identity=(device,obj,drive,props['DeviceNumber'],req['serial'])
+    if expected is not None and identity!=expected:raise Failure('selected disk identity changed during setup')
+    if partition_object is None:return identity
+    child,name=block(partition_object)
+    partition=objects.get(partition_object,{}).get(prefix+'Partition',{})
+    if partition.get('Table')!=obj or child.get('Drive')!=drive or not partition.get('UUID'):raise Failure('returned partition belongs to another disk')
+    # Retain the partition GUID, not an invented by-id suffix or sdX arithmetic.
+    return name,partition['UUID']
+
+
 def inspect(common):
     rows=[]
     for j in common.records('drives'):
         r=dict(j)
-        if r['state']!='ready':r['state']='unfinished';r['error']='Interrupted provisioning: inspect existing partition/header. Never format it again.'
-        elif r.get('autoUnlock'):r['keyfilePresent']=keyfile_ok(r)
+        if r['state']!='ready':
+            if r['state']!='unfinished':r['interruptedState']=r['state']
+            r['state']='unfinished';r['error']='Interrupted provisioning: inspect existing partition/header. Never format it again.'
+        # Presence describes the actual key, not permission to reconnect.
+        # Ready manual drives still require their recovery passphrase.
+        else:r['keyfilePresent']=keyfile_ok(r)
         rows.append(r)
     return rows
 
@@ -61,6 +98,7 @@ def provision(request,secret,common):
     keypath=pathlib.Path('/etc/cryptsetup-keys.d')/(req['name']+'.key')
     if os.path.lexists(keypath):raise Failure('keyfile name already exists')
     prepare_mountpoint(str(mountpoint))
+    identity=selected_identity(req)
     id=uuid.uuid4().hex;j={**req,'id':id,'state':'planned','boot_id':common.boot_id(),'created':time.time(),'testFixture':testing}
     def stage(value):j['state']=value;j['updated']=time.time();common.journal('drives',id,j)
     try:
@@ -71,37 +109,49 @@ def provision(request,secret,common):
         except Failure:pass  # unusual serial: the per-volume rule below still applies
         # UDisks owns GPT creation and the encrypted filesystem format.
         from gi.repository import GLib
-        obj=block_object(device)
+        obj=selected_identity(req,identity)[1]
         udisks_call(obj,'Block','Format','(sa{sv})',('gpt',{}))
+        selected_identity(req,identity)
         part_obj=udisks_call(obj,'PartitionTable','CreatePartition','(ttssa{sv})',(1024*1024,0,'','Drives data',{}))[0]
-        run(['udevadm','settle']);part=device+('p1' if device[-1].isdigit() else '1');j['partition']=part
+        run(['udevadm','settle'])
+        part,part_uuid=selected_identity(req,identity,part_obj)
+        j['partition']=part;j['partitionUUID']=part_uuid
+        j['partitionById']='/dev/disk/by-partuuid/'+part_uuid
+        j['manualSecretOnly']=not req['autoUnlock'];j['keyfile']=str(keypath) if req['autoUnlock'] else None
+        j['header']=str(common.state_dir/'drives'/(id+'.header'))
         stage('encrypting')
         # The trusted udisks API requires its secret in an encrypt.passphrase variant;
         # our public helper protocol accepts only a sealed FD and never echoes it.
+        if selected_identity(req,identity,part_obj)!=(part,part_uuid):raise Failure('partition identity changed before format')
         udisks_call(part_obj,'Block','Format','(sa{sv})',('btrfs',{'encrypt.type':GLib.Variant('s','luks2'),'encrypt.passphrase':GLib.Variant('s',secret.decode('utf-8')),'label':GLib.Variant('s',req['name'])}))
-        run(['udevadm','settle']);stage('encrypted')
+        run(['udevadm','settle'])
+        if selected_identity(req,identity,part_obj)!=(part,part_uuid):raise Failure('partition identity changed after format')
+        stage('encrypted')
         # The LUKS UUID exists now: hide the partition and its opened volume
         # before it is closed and reopened below (each emits a desktop event).
         # Best-effort here; finish() writes and validates the same rule again.
         try:hide_from_automount(req['name'],run(['blkid','-s','UUID','-o','value',part]).decode().strip())
         except Failure:pass
-        keypath.parent.mkdir(mode=0o700,exist_ok=True)
-        fd=os.open(keypath,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
-        try:os.write(fd,os.urandom(64));os.fsync(fd)
-        finally:os.close(fd)
-        run(['cryptsetup','luksAddKey','--key-file','-',part,str(keypath)],data=secret,timeout=180)
-        run(['cryptsetup','open','--test-passphrase','--key-file',str(keypath),part],timeout=180)
+        # Manual setup uses only the supplied in-memory recovery secret. Never
+        # create a random bypass key (even temporarily) on a plaintext OS disk.
+        j['manualSecretOnly']=not req['autoUnlock']
+        j['keyfile']=str(keypath) if req['autoUnlock'] else None
+        j['header']=str(common.state_dir/'drives'/(id+'.header'))
+        j['luksUUID']=run(['cryptsetup','luksUUID',part]).decode().strip()
+        stage('encrypted')
+        if req['autoUnlock']:
+            keypath.parent.mkdir(mode=0o700,exist_ok=True)
+            fd=os.open(keypath,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
+            try:os.write(fd,os.urandom(64));os.fsync(fd)
+            finally:os.close(fd)
+            run(['cryptsetup','luksAddKey','--key-file','-',part,str(keypath)],data=secret,timeout=180)
+            run(['cryptsetup','open','--test-passphrase','--key-file',str(keypath),part],timeout=180)
         run(['cryptsetup','open','--test-passphrase','--key-file','-',part],data=secret,timeout=180)
         descendants=chains(blocks());mapper=next((c[-1]['name'] for cs in descendants.values() for c in cs if c[-1]['type']=='crypt' and any(n['name']==part for n in c)),None)
         if mapper:run(['cryptsetup','close',os.path.basename(mapper)])
-        j['keyfile']=str(keypath);j['header']=str(common.state_dir/'drives'/(id+'.header'))
-        stage('formatted');run(['cryptsetup','open','--key-file',str(keypath),part,req['name']],timeout=180)
-        mapper='/dev/mapper/'+req['name']
-        filesystem=run(['blkid','-s','TYPE','-o','value',mapper]).strip()
-        if filesystem!=b'btrfs':raise Failure('format did not create Btrfs on mapper')
-        header=common.state_dir/'drives'/(id+'.header')
-        run(['cryptsetup','luksHeaderBackup',part,'--header-backup-file',str(header)],timeout=60);os.chmod(header,0o600)
-        j['header']=str(header);j['keyfile']=str(keypath);stage('configuring')
+        stage('formatted')
+        if req['autoUnlock']:run(['cryptsetup','open','--key-file',str(keypath),part,req['name']],timeout=180)
+        else:run(['cryptsetup','open','--key-file','-',part,req['name']],data=secret,timeout=180)
         return finish(j,common)
     except BaseException as exc:
         if common.path('drives',id).exists():j=common.read('drives',id)
@@ -109,12 +159,14 @@ def provision(request,secret,common):
         j['error']=str(exc)[:300];stage('unfinished');raise
 
 
-def resume(id,common):
+def resume(id,common,recovery_secret=None):
     j=common.read('drives',id)
     if j['state']=='ready':return {'ok':True,'id':id,'state':'ready'}
     eligible=j.get('interruptedState') if j['state']=='unfinished' else j['state']
     if eligible not in ('formatted','configuring','finalizing'):raise Failure('unsafe stage: inspect the existing header; never format it again')
-    try:return finish(j,common)
+    try:
+        if recovery_secret is None:return finish(j,common)
+        return finish(j,common,recovery_secret=recovery_secret)
     except BaseException as exc:
         durable=common.read('drives',id)
         durable['interruptedState']=durable.get('interruptedState',eligible) if durable['state']=='unfinished' else durable['state']
@@ -128,24 +180,35 @@ def unlock(id,secret,common):
     if not re.fullmatch('[a-f0-9]{32}',id):raise Failure('invalid drive id')
     if not 8<=len(secret)<=4096 or b'\0' in secret:raise Failure('invalid recovery passphrase')
     j=common.read('drives',id)
-    if j.get('state')!='ready':raise Failure('drive setup is unfinished; continue setup instead')
+    unfinished=j.get('state')!='ready'
+    eligible=j.get('interruptedState') if j.get('state')=='unfinished' else j.get('state')
+    if unfinished and not (not j.get('autoUnlock') and (eligible in ('formatted','configuring','finalizing') or (j.get('manualSecretOnly') is True and eligible in ('encrypting','encrypted')))):raise Failure('drive setup is unfinished; continue setup instead')
     name=j['name'];mapper='/dev/mapper/'+name
     part=configured_partition(j)
     if j.get('luksUUID'):
         from helper.common import hide_from_automount
         hide_from_automount(j['name'],j['luksUUID'])
+    if unfinished and not j.get('manualSecretOnly'):
+        run(['cryptsetup','open','--test-passphrase','--key-file','-',part],data=secret,timeout=180)
     if os.path.exists(mapper):
         if not any(any(n['name']==part for n in c) for c in chains(blocks()).get(mapper,[])):raise Failure('mapper name is used by another device')
     else:
         try:run(['cryptsetup','open','--key-file','-',part,name],data=secret,timeout=180)
         except Failure:raise Failure('the recovery passphrase did not unlock this drive') from None
     run(['udevadm','settle'],timeout=60)
+    if unfinished:
+        # No format call is ever retried. A completed LUKS/Btrfs format is
+        # validated by finish; a partial/non-Btrfs format fails closed.
+        j['state']='formatted';j.pop('interruptedState',None)
+        common.journal('drives',id,j)
+        return resume(id,common,recovery_secret=None if j.get('manualSecretOnly') else secret)
     return mount_and_reconnect(j,common)
 
 
 def configured_partition(j):
     part=os.path.realpath(j.get('partitionById') or j['partition'],strict=True)
     run(['cryptsetup','isLuks',part])
+    if j.get('partitionUUID') and run(['blkid','-s','PARTUUID','-o','value',part]).decode().strip()!=j['partitionUUID']:raise Failure('this is not the configured partition')
     if j.get('luksUUID') and run(['cryptsetup','luksUUID',part]).decode().strip()!=j['luksUUID']:raise Failure('this is not the configured drive')
     return part
 

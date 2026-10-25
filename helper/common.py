@@ -7,9 +7,22 @@ class Failure(RuntimeError):
 def run(argv, data=None, timeout=30, cap=2*1024*1024, accepted=(0,)):
     if not isinstance(argv,(list,tuple)) or not argv or any(not isinstance(x,str) or '\0' in x for x in argv):
         raise Failure('invalid command')
-    p=subprocess.Popen(argv,stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+    from helper import workerlease
+    with workerlease.borrow() as lease:
+        if pathlib.Path(argv[0]).name=='systemd-run':
+            if lease is None:
+                # Standalone root CLI callers get the same writer exclusion;
+                # scheduler/offline callers transfer their existing lease.
+                with Common().storage_lock():return run(argv,data,timeout,cap,accepted)
+            from helper.transient import run as transient_run
+            return transient_run(argv,data,timeout,cap,accepted,lease)
+        env={} if lease is None else {workerlease.ENV:str(lease)}
+        return _run(argv,data,timeout,cap,accepted,pass_fds=() if lease is None else (lease,),env_extra=env)
+
+def _run(argv, data=None, timeout=30, cap=2*1024*1024, accepted=(0,),*,stdin=None,pass_fds=(),env_extra=None):
+    p=subprocess.Popen(argv,stdin=stdin if stdin is not None else (subprocess.PIPE if data is not None else subprocess.DEVNULL),
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
-        env={'PATH':'/usr/bin:/bin','LC_ALL':'C','HOME':'/root' if os.geteuid()==0 else os.path.expanduser('~')})
+        pass_fds=pass_fds,env=dict({'PATH':'/usr/bin:/bin','LC_ALL':'C','HOME':'/root' if os.geteuid()==0 else os.path.expanduser('~')},**(env_extra or {})))
     out,err=bytearray(),bytearray();sel=selectors.DefaultSelector();end=time.monotonic()+timeout
     try:
         if data is not None:
@@ -25,15 +38,20 @@ def run(argv, data=None, timeout=30, cap=2*1024*1024, accepted=(0,)):
                 target=out if key.data=='out' else err
                 if len(target)+len(chunk)>cap:raise Failure('command output limit exceeded')
                 target.extend(chunk)
-        code=p.wait(timeout=max(.1,end-time.monotonic()))
-        if code not in accepted:raise Failure(pathlib.Path(argv[0]).name+' failed (exit '+str(code)+')')
-        return bytes(out)
-    except BaseException:
-        with contextlib.suppress(ProcessLookupError):os.killpg(p.pid,signal.SIGKILL)
-        p.wait()
-        raise
+        # Keep the leader's PID/PGID reserved until its entire group is signalled.
+        # Popen.poll/wait would reap it and make a later root killpg unsafe.
+        while os.waitid(os.P_PID,p.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT) is None:
+            if time.monotonic()>end:raise Failure('command deadline exceeded')
+            time.sleep(.01)
     finally:
-        sel.close();p.stdout.close();p.stderr.close()
+        try:
+            with contextlib.suppress(ProcessLookupError):os.killpg(p.pid,signal.SIGKILL)
+            code=p.wait()
+        finally:
+            sel.close();p.stdout.close();p.stderr.close()
+            if p.stdin is not None:p.stdin.close()
+    if code not in accepted:raise Failure(pathlib.Path(argv[0]).name+' failed (exit '+str(code)+')')
+    return bytes(out)
 
 def read_regular(path,cap=2*1024*1024):
     fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
@@ -116,14 +134,18 @@ class Common:
         from helper.maintenance import private_directory
         directory=private_directory(self.state_dir)
         fd=os.open(directory/'storage.lock',os.O_RDWR|os.O_CREAT|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        from helper import workerlease
         try:
             info=os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077 or info.st_nlink!=1:
                 raise Failure('unsafe storage transaction lock')
             try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise Failure('another storage operation is already running') from None
+            workerlease.register(fd)
             yield
-        finally:os.close(fd)
+        finally:
+            workerlease.unregister(fd)
+            os.close(fd)
     def config(self,path,id,line=None):
         path=pathlib.Path(path)
         if str(path) not in ('/etc/fstab','/etc/crypttab'):raise Failure('invalid configuration file')
